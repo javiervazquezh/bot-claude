@@ -119,37 +119,64 @@ impl BinanceWebSocket {
 
         info!("WebSocket connected");
 
-        // Send ping every 30 seconds
-        let ping_tx = tx.clone();
+        // Spawn ping task that sends actual ping messages every 30 seconds
+        let (ping_tx, mut ping_rx) = mpsc::channel::<()>(10);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                debug!("Sending ping");
+                if ping_tx.send(()).await.is_err() {
+                    break;
+                }
             }
         });
 
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Some(event) = Self::parse_message(&text) {
-                        if tx.send(event).await.is_err() {
+        // Main message loop
+        loop {
+            tokio::select! {
+                // Handle incoming messages
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Some(event) = Self::parse_message(&text) {
+                                if tx.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            debug!("Received ping from server, sending pong");
+                            if write.send(Message::Pong(data)).await.is_err() {
+                                error!("Failed to send pong");
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {
+                            debug!("Received pong from server");
+                        }
+                        Some(Ok(Message::Close(_))) => {
+                            info!("WebSocket closed by server");
                             break;
                         }
+                        Some(Err(e)) => {
+                            error!("WebSocket error: {}", e);
+                            break;
+                        }
+                        None => {
+                            warn!("WebSocket stream ended");
+                            break;
+                        }
+                        _ => {}
                     }
                 }
-                Ok(Message::Ping(data)) => {
-                    debug!("Received ping, sending pong");
+                // Send periodic pings to keep connection alive
+                _ = ping_rx.recv() => {
+                    debug!("Sending ping to server");
+                    if write.send(Message::Ping(vec![])).await.is_err() {
+                        error!("Failed to send ping");
+                        break;
+                    }
                 }
-                Ok(Message::Close(_)) => {
-                    info!("WebSocket closed by server");
-                    break;
-                }
-                Err(e) => {
-                    error!("WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
             }
         }
 
