@@ -1,0 +1,413 @@
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tracing::{debug, info, warn};
+
+use crate::types::{
+    Order, OrderStatus, Position, PositionStatus, PortfolioSnapshot, Side, TradingPair,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Portfolio {
+    pub balances: HashMap<String, Decimal>,
+    pub positions: HashMap<String, Position>,
+    pub orders: HashMap<String, Order>,
+    pub initial_capital: Decimal,
+    pub total_trades: u64,
+    pub winning_trades: u64,
+    pub losing_trades: u64,
+    pub total_pnl: Decimal,
+    pub peak_equity: Decimal,
+    pub max_drawdown: Decimal,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Portfolio {
+    pub fn new(initial_capital: Decimal) -> Self {
+        let mut balances = HashMap::new();
+        balances.insert("USDT".to_string(), initial_capital);
+
+        Self {
+            balances,
+            positions: HashMap::new(),
+            orders: HashMap::new(),
+            initial_capital,
+            total_trades: 0,
+            winning_trades: 0,
+            losing_trades: 0,
+            total_pnl: Decimal::ZERO,
+            peak_equity: initial_capital,
+            max_drawdown: Decimal::ZERO,
+            created_at: Utc::now(),
+        }
+    }
+
+    pub fn get_balance(&self, asset: &str) -> Decimal {
+        self.balances.get(asset).copied().unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn update_balance(&mut self, asset: &str, amount: Decimal) {
+        let entry = self.balances.entry(asset.to_string()).or_insert(Decimal::ZERO);
+        *entry += amount;
+        debug!("Balance updated: {} {}: {}", asset, if amount > Decimal::ZERO { "+" } else { "" }, amount);
+    }
+
+    pub fn set_balance(&mut self, asset: &str, amount: Decimal) {
+        self.balances.insert(asset.to_string(), amount);
+    }
+
+    pub fn available_usdt(&self) -> Decimal {
+        self.get_balance("USDT")
+    }
+
+    pub fn total_equity(&self, prices: &HashMap<TradingPair, Decimal>) -> Decimal {
+        let mut equity = self.get_balance("USDT");
+
+        for position in self.positions.values() {
+            if position.status == PositionStatus::Open {
+                if let Some(price) = prices.get(&position.pair) {
+                    equity += position.quantity * *price;
+                }
+            }
+        }
+
+        // Add value of any held crypto
+        for (asset, balance) in &self.balances {
+            if asset != "USDT" && *balance > Decimal::ZERO {
+                // Map asset to trading pair
+                let pair = match asset.as_str() {
+                    "BTC" => Some(TradingPair::BTCUSDT),
+                    "ETH" => Some(TradingPair::ETHUSDT),
+                    "SOL" => Some(TradingPair::SOLUSDT),
+                    _ => None,
+                };
+                if let Some(pair) = pair {
+                    if let Some(price) = prices.get(&pair) {
+                        equity += *balance * *price;
+                    }
+                }
+            }
+        }
+
+        equity
+    }
+
+    pub fn open_position(&mut self, position: Position) {
+        info!(
+            "Opening position: {} {} {} @ {}",
+            position.side, position.quantity, position.pair, position.entry_price
+        );
+
+        let cost = position.entry_value();
+        let quote = position.pair.quote_asset();
+
+        // Deduct cost from balance
+        self.update_balance(quote, -cost);
+
+        self.positions.insert(position.id.clone(), position);
+    }
+
+    pub fn close_position(&mut self, position_id: &str, exit_price: Decimal) -> Option<Decimal> {
+        let position = self.positions.get_mut(position_id)?;
+
+        if position.status != PositionStatus::Open {
+            warn!("Attempting to close non-open position: {}", position_id);
+            return None;
+        }
+
+        position.close(exit_price);
+        let pnl = position.realized_pnl;
+        let exit_value = position.quantity * exit_price;
+
+        info!(
+            "Closed position: {} {} {} @ {} -> PnL: {}",
+            position.side, position.quantity, position.pair, exit_price, pnl
+        );
+
+        // Return value to balance
+        let quote = position.pair.quote_asset();
+        self.update_balance(quote, exit_value);
+
+        // Update statistics
+        self.total_trades += 1;
+        self.total_pnl += pnl;
+
+        if pnl > Decimal::ZERO {
+            self.winning_trades += 1;
+        } else if pnl < Decimal::ZERO {
+            self.losing_trades += 1;
+        }
+
+        Some(pnl)
+    }
+
+    pub fn update_position_price(&mut self, pair: TradingPair, price: Decimal) {
+        for position in self.positions.values_mut() {
+            if position.pair == pair && position.status == PositionStatus::Open {
+                position.update_price(price);
+            }
+        }
+    }
+
+    pub fn get_open_positions(&self) -> Vec<&Position> {
+        self.positions
+            .values()
+            .filter(|p| p.status == PositionStatus::Open)
+            .collect()
+    }
+
+    pub fn get_position_for_pair(&self, pair: TradingPair) -> Option<&Position> {
+        self.positions
+            .values()
+            .find(|p| p.pair == pair && p.status == PositionStatus::Open)
+    }
+
+    pub fn get_position_for_pair_mut(&mut self, pair: TradingPair) -> Option<&mut Position> {
+        self.positions
+            .values_mut()
+            .find(|p| p.pair == pair && p.status == PositionStatus::Open)
+    }
+
+    pub fn has_open_position(&self, pair: TradingPair) -> bool {
+        self.get_position_for_pair(pair).is_some()
+    }
+
+    pub fn position_count(&self) -> usize {
+        self.get_open_positions().len()
+    }
+
+    pub fn total_unrealized_pnl(&self) -> Decimal {
+        self.positions
+            .values()
+            .filter(|p| p.status == PositionStatus::Open)
+            .map(|p| p.unrealized_pnl)
+            .sum()
+    }
+
+    pub fn add_order(&mut self, order: Order) {
+        self.orders.insert(order.client_order_id.clone(), order);
+    }
+
+    pub fn update_order(&mut self, order_id: &str, status: OrderStatus, filled_qty: Decimal, avg_price: Option<Decimal>) {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            order.status = status;
+            order.filled_quantity = filled_qty;
+            order.average_fill_price = avg_price;
+            order.updated_at = Utc::now();
+        }
+    }
+
+    pub fn get_active_orders(&self) -> Vec<&Order> {
+        self.orders.values().filter(|o| o.status.is_active()).collect()
+    }
+
+    pub fn update_drawdown(&mut self, prices: &HashMap<TradingPair, Decimal>) {
+        let equity = self.total_equity(prices);
+
+        if equity > self.peak_equity {
+            self.peak_equity = equity;
+        }
+
+        let drawdown = if !self.peak_equity.is_zero() {
+            ((self.peak_equity - equity) / self.peak_equity) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+
+        if drawdown > self.max_drawdown {
+            self.max_drawdown = drawdown;
+        }
+    }
+
+    pub fn win_rate(&self) -> Decimal {
+        if self.total_trades == 0 {
+            return Decimal::ZERO;
+        }
+        Decimal::from(self.winning_trades) / Decimal::from(self.total_trades) * Decimal::from(100)
+    }
+
+    pub fn profit_factor(&self) -> Decimal {
+        let gross_profit: Decimal = self.positions
+            .values()
+            .filter(|p| p.realized_pnl > Decimal::ZERO)
+            .map(|p| p.realized_pnl)
+            .sum();
+
+        let gross_loss: Decimal = self.positions
+            .values()
+            .filter(|p| p.realized_pnl < Decimal::ZERO)
+            .map(|p| p.realized_pnl.abs())
+            .sum();
+
+        if gross_loss.is_zero() {
+            if gross_profit > Decimal::ZERO {
+                Decimal::from(100) // Infinite, cap at 100
+            } else {
+                Decimal::ONE
+            }
+        } else {
+            gross_profit / gross_loss
+        }
+    }
+
+    // ========== Advanced Position Management Methods ==========
+
+    /// Scale into an existing position by adding more quantity
+    // Stubbed - position management removed
+    pub fn scale_position(&mut self, _position_id: &str, _additional_qty: Decimal, _price: Decimal) -> Result<()> {
+        Err(anyhow::anyhow!("Position scaling not supported - position management removed"))
+    }
+
+    /// Close a portion of an existing position
+    pub fn partial_close_position(&mut self, position_id: &str, quantity: Decimal, price: Decimal) -> Result<Decimal> {
+        Err(anyhow::anyhow!("Partial close not supported - position management removed"))
+    }
+
+            if quantity > position.quantity {
+                return Err(anyhow::anyhow!(
+                    "Cannot close {} (more than position quantity {})",
+                    quantity,
+                    position.quantity
+                ));
+            }
+
+            (position.pair.quote_asset(), position.pair)
+        };
+
+        info!(
+            "Partially closing position {}: Closing {} {} @ {}",
+            position_id, quantity, pair, price
+        );
+
+        // Now get mutable reference and perform partial close
+        let (pnl, is_fully_closed) = {
+            let position = self.positions
+                .get_mut(position_id)
+                .ok_or_else(|| anyhow::anyhow!("Position not found: {}", position_id))?;
+
+            let pnl = position.partial_close(quantity, price, "Partial exit".to_string())?;
+            let fully_closed = position.quantity == Decimal::ZERO;
+            (pnl, fully_closed)
+        };
+
+        // Return value to balance
+        let exit_value = quantity * price;
+        self.update_balance(quote, exit_value);
+
+        // Update statistics for partial close
+        self.total_pnl += pnl;
+
+        // If position fully closed, update trade statistics
+        if is_fully_closed {
+            self.total_trades += 1;
+            if pnl > Decimal::ZERO {
+                self.winning_trades += 1;
+            } else if pnl < Decimal::ZERO {
+                self.losing_trades += 1;
+            }
+        }
+
+        Ok(pnl)
+    }
+
+    /// Update trailing stops for all open positions and return IDs of positions to close
+    pub fn update_all_trailing_stops(&mut self, prices: &HashMap<TradingPair, Decimal>) -> Vec<String> {
+        Vec::new()
+    }
+
+            if let Some(current_price) = prices.get(&position.pair) {
+                // Update trailing stop and check if triggered
+                if position.update_trailing(*current_price) {
+                    info!(
+                        "Trailing stop triggered for position {}: {} @ {}",
+                        id, position.pair, current_price
+                    );
+                    positions_to_close.push(id.clone());
+                }
+            }
+        }
+
+        positions_to_close
+    }
+
+    /// Check all positions for time-based exits and return IDs to close
+    pub fn check_time_based_exits(&self, max_hours: u32) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Move stop-loss to break-even for a specific position
+    pub fn move_stop_to_breakeven(&mut self, position_id: &str) -> Result<()> {
+        Err(anyhow::anyhow!("Break-even stops not supported - position management removed"))
+    }
+
+        if position.has_breakeven_stop() {
+            return Ok(()); // Already at break-even
+        }
+
+        info!(
+            "Moving stop to break-even for position {}: {} @ {}",
+            position_id, position.pair, position.entry_price
+        );
+
+        position.move_stop_to_breakeven();
+        Ok(())
+    }
+
+    /// Get position by ID (mutable)
+    pub fn get_position_mut(&mut self, position_id: &str) -> Option<&mut Position> {
+        self.positions.get_mut(position_id)
+    }
+
+    /// Get position by ID (immutable)
+    pub fn get_position(&self, position_id: &str) -> Option<&Position> {
+        self.positions.get(position_id)
+    }
+
+    pub fn snapshot(&self, prices: &HashMap<TradingPair, Decimal>) -> PortfolioSnapshot {
+        let total_equity = self.total_equity(prices);
+        let daily_pnl = self.total_pnl; // Simplified - would track daily in production
+        let daily_pnl_pct = if !self.initial_capital.is_zero() {
+            (daily_pnl / self.initial_capital) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+
+        PortfolioSnapshot {
+            timestamp: Utc::now(),
+            total_equity,
+            available_balance: self.available_usdt(),
+            total_unrealized_pnl: self.total_unrealized_pnl(),
+            total_realized_pnl: self.total_pnl,
+            positions: self.positions.values().cloned().collect(),
+            daily_pnl,
+            daily_pnl_percentage: daily_pnl_pct,
+        }
+    }
+}
+
+impl Default for Portfolio {
+    fn default() -> Self {
+        Self::new(Decimal::from(2000)) // Default $2000 capital
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_portfolio_creation() {
+        let portfolio = Portfolio::new(Decimal::from(1000));
+        assert_eq!(portfolio.available_usdt(), Decimal::from(1000));
+        assert_eq!(portfolio.position_count(), 0);
+    }
+
+    #[test]
+    fn test_balance_update() {
+        let mut portfolio = Portfolio::new(Decimal::from(1000));
+        portfolio.update_balance("USDT", Decimal::from(-500));
+        assert_eq!(portfolio.available_usdt(), Decimal::from(500));
+    }
+}

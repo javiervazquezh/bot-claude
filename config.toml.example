@@ -1,0 +1,38 @@
+# Crypto Trading Bot Configuration
+# Copy this file to config.toml and customize
+
+[general]
+mode = "Paper"  # "Paper" or "Live"
+log_level = "info"  # "debug", "info", "warn", "error"
+data_dir = "./data"
+
+[trading]
+initial_capital = "2000"  # Starting capital in USDT
+trading_pairs = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["5m", "15m", "1h"]
+min_confidence = "0.60"  # Minimum signal confidence (0-1)
+min_risk_reward = "1.5"  # Minimum risk/reward ratio
+
+[risk]
+max_positions = 3
+max_single_position_pct = "25"  # Max % of capital per position
+max_total_exposure_pct = "60"  # Max % of capital in all positions
+risk_per_trade_pct = "1.5"  # % of capital risked per trade
+default_stop_loss_pct = "3"
+default_take_profit_pct = "5"
+min_risk_reward_ratio = "1.5"
+max_drawdown_pct = "15"
+max_daily_loss_pct = "5"
+max_holding_hours = 72
+max_correlated_positions = 2
+
+[api]
+api_key = ""  # Your Binance.US API key
+secret_key = ""  # Your Binance.US secret key
+use_testnet = true  # Use testnet for testing
+
+[notifications]
+enabled = false
+on_trade = true
+on_error = true
+daily_summary = true
