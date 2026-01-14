@@ -1,0 +1,26 @@
+/target
+
+# Environment and secrets
+.env
+*.secrets
+config.toml
+
+# Data
+/data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Database
+*.db
+*.db-journal

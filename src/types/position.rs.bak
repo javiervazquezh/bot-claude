@@ -1,0 +1,315 @@
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{Side, TradingPair};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PositionStatus {
+    Open,
+    Closed,
+    Liquidated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Position {
+    pub id: String,
+    pub pair: TradingPair,
+    pub side: Side,
+    pub status: PositionStatus,
+    pub entry_price: Decimal,
+    pub current_price: Decimal,
+    pub quantity: Decimal,
+    pub stop_loss: Option<Decimal>,
+    pub take_profit: Option<Decimal>,
+    pub unrealized_pnl: Decimal,
+    pub realized_pnl: Decimal,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub strategy_id: String,
+    pub order_ids: Vec<String>,
+}
+
+impl Position {
+    pub fn new(
+        pair: TradingPair,
+        side: Side,
+        entry_price: Decimal,
+        quantity: Decimal,
+        strategy_id: String,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            pair,
+            side,
+            status: PositionStatus::Open,
+            entry_price,
+            current_price: entry_price,
+            quantity,
+            stop_loss: None,
+            take_profit: None,
+            unrealized_pnl: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+            opened_at: Utc::now(),
+            closed_at: None,
+            strategy_id,
+            order_ids: Vec::new(),
+            state: None,
+        }
+    }
+
+    pub fn update_price(&mut self, price: Decimal) {
+        self.current_price = price;
+        self.unrealized_pnl = self.calculate_pnl(price);
+    }
+
+    pub fn calculate_pnl(&self, price: Decimal) -> Decimal {
+        let price_diff = price - self.entry_price;
+        match self.side {
+            Side::Buy => price_diff * self.quantity,
+            Side::Sell => -price_diff * self.quantity,
+        }
+    }
+
+    pub fn pnl_percentage(&self) -> Decimal {
+        if self.entry_price.is_zero() {
+            return Decimal::ZERO;
+        }
+        let entry_value = self.entry_price * self.quantity;
+        if entry_value.is_zero() {
+            return Decimal::ZERO;
+        }
+        (self.unrealized_pnl / entry_value) * Decimal::from(100)
+    }
+
+    pub fn notional_value(&self) -> Decimal {
+        self.current_price * self.quantity
+    }
+
+    pub fn entry_value(&self) -> Decimal {
+        self.entry_price * self.quantity
+    }
+
+    pub fn should_stop_loss(&self) -> bool {
+        if let Some(sl) = self.stop_loss {
+            match self.side {
+                Side::Buy => self.current_price <= sl,
+                Side::Sell => self.current_price >= sl,
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn should_take_profit(&self) -> bool {
+        if let Some(tp) = self.take_profit {
+            match self.side {
+                Side::Buy => self.current_price >= tp,
+                Side::Sell => self.current_price <= tp,
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn close(&mut self, exit_price: Decimal) {
+        self.current_price = exit_price;
+        self.realized_pnl = self.calculate_pnl(exit_price);
+        self.unrealized_pnl = Decimal::ZERO;
+        self.status = PositionStatus::Closed;
+        self.closed_at = Some(Utc::now());
+    }
+
+    pub fn with_stop_loss(mut self, stop_loss: Decimal) -> Self {
+        self.stop_loss = Some(stop_loss);
+        self
+    }
+
+    pub fn with_take_profit(mut self, take_profit: Decimal) -> Self {
+        self.take_profit = Some(take_profit);
+        self
+    }
+
+    pub fn duration(&self) -> chrono::Duration {
+        let end = self.closed_at.unwrap_or_else(Utc::now);
+        end - self.opened_at
+    }
+
+    pub fn is_profitable(&self) -> bool {
+        self.unrealized_pnl > Decimal::ZERO || self.realized_pnl > Decimal::ZERO
+    }
+
+    // ========== Advanced Position Management Methods ==========
+
+    /// Enable advanced position management with state tracking
+    pub fn enable_advanced_management(&mut self) {
+        if self.state.is_none() {
+            self.state = Some(PositionState::new(
+                self.id.clone(),
+                self.quantity,
+                self.entry_price,
+            ));
+        }
+    }
+
+    /// Enable trailing stop-loss
+    pub fn enable_trailing_stop(&mut self, activation_pct: Decimal, trail_pct: Decimal) {
+        self.enable_advanced_management();
+        if let Some(state) = &mut self.state {
+            state.trailing_stop = Some(crate::engine::position_state::TrailingStop::new(
+                activation_pct,
+                trail_pct,
+            ));
+        }
+    }
+
+    /// Add to existing position (pyramiding/scaling)
+    pub fn add_to_position(&mut self, quantity: Decimal, price: Decimal) -> Result<()> {
+        self.enable_advanced_management();
+
+        if let Some(state) = &mut self.state {
+            state.add_layer(quantity, price);
+            self.quantity = state.get_total_quantity();
+            self.entry_price = state.get_weighted_entry_price();
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Position state not initialized"))
+        }
+    }
+
+    /// Close a portion of the position
+    pub fn partial_close(&mut self, quantity: Decimal, price: Decimal, reason: String) -> Result<Decimal> {
+        if self.state.is_none() {
+            // If no state, treat as single-layer position
+            if quantity > self.quantity {
+                return Err(anyhow::anyhow!("Cannot close more than position quantity"));
+            }
+
+            let pnl = (price - self.entry_price) * quantity;
+            self.quantity -= quantity;
+            self.realized_pnl += pnl;
+            self.update_price(price);
+
+            // Close position entirely if quantity reaches zero
+            if self.quantity == Decimal::ZERO {
+                self.close(price);
+            }
+
+            return Ok(pnl);
+        }
+
+        // Use state for partial close
+        if let Some(state) = &mut self.state {
+            let pnl = state.partial_close(quantity, price, reason)?;
+            self.quantity = state.get_total_quantity();
+            self.entry_price = state.get_weighted_entry_price();
+            self.realized_pnl += pnl;
+            self.update_price(price);
+
+            // Close position entirely if quantity reaches zero
+            if self.quantity == Decimal::ZERO {
+                self.close(price);
+            }
+
+            Ok(pnl)
+        } else {
+            Err(anyhow::anyhow!("Position state not initialized"))
+        }
+    }
+
+    /// Update trailing stop and return true if stop was triggered
+    pub fn update_trailing(&mut self, current_price: Decimal) -> bool {
+        if let Some(state) = &mut self.state {
+            if let Some(trailing) = &mut state.trailing_stop {
+                // Update the trailing stop
+                if let Some(new_stop) = trailing.update(current_price, self.entry_price, &self.side) {
+                    self.stop_loss = Some(new_stop);
+                }
+
+                // Check if triggered
+                return trailing.is_triggered(current_price, &self.side);
+            }
+        }
+        false
+    }
+
+    /// Move stop-loss to break-even
+    pub fn move_stop_to_breakeven(&mut self) {
+        self.stop_loss = Some(self.entry_price);
+
+        if let Some(state) = &mut self.state {
+            state.breakeven_stop_set = true;
+        }
+    }
+
+    /// Check if position should exit based on time
+    pub fn should_time_exit(&self, max_hours: u32) -> bool {
+        if let Some(state) = &self.state {
+            return state.should_time_exit(max_hours);
+        }
+
+        // Fall back to simple duration check
+        let duration = self.duration();
+        duration.num_hours() as u32 >= max_hours
+    }
+
+    /// Get number of position layers (for scaled positions)
+    pub fn layer_count(&self) -> usize {
+        self.state.as_ref().map_or(1, |s| s.layer_count())
+    }
+
+    /// Get total realized P&L from partial exits
+    pub fn total_partial_exit_pnl(&self) -> Decimal {
+        self.state.as_ref().map_or(Decimal::ZERO, |s| s.total_partial_exit_pnl())
+    }
+
+    /// Check if trailing stop is active
+    pub fn has_active_trailing_stop(&self) -> bool {
+        self.state
+            .as_ref()
+            .and_then(|s| s.trailing_stop.as_ref())
+            .map_or(false, |t| t.active)
+    }
+
+    /// Get current trailing stop level
+    pub fn get_trailing_stop_level(&self) -> Option<Decimal> {
+        self.state
+            .as_ref()
+            .and_then(|s| s.trailing_stop.as_ref())
+            .filter(|t| t.active)
+            .map(|t| t.current_stop)
+    }
+
+    /// Check if break-even stop has been set
+    pub fn has_breakeven_stop(&self) -> bool {
+        self.state.as_ref().map_or(false, |s| s.breakeven_stop_set)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioSnapshot {
+    pub timestamp: DateTime<Utc>,
+    pub total_equity: Decimal,
+    pub available_balance: Decimal,
+    pub total_unrealized_pnl: Decimal,
+    pub total_realized_pnl: Decimal,
+    pub positions: Vec<Position>,
+    pub daily_pnl: Decimal,
+    pub daily_pnl_percentage: Decimal,
+}
+
+impl PortfolioSnapshot {
+    pub fn position_count(&self) -> usize {
+        self.positions.iter().filter(|p| p.status == PositionStatus::Open).count()
+    }
+
+    pub fn total_position_value(&self) -> Decimal {
+        self.positions
+            .iter()
+            .filter(|p| p.status == PositionStatus::Open)
+            .map(|p| p.notional_value())
+            .sum()
+    }
+}
