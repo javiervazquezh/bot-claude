@@ -10,7 +10,7 @@ use crate::exchange::BinanceClient;
 use crate::strategies::{Strategy, StrategySignal, create_improved_strategy, create_strategies_for_pair};
 use crate::types::{Candle, CandleBuffer, Position, PositionStatus, Side, Signal, TimeFrame, TradingPair};
 
-use super::results::{BacktestResults, EquityPoint, ExitReason, MetricsCalculator, TradeRecord};
+use super::results::{BacktestResults, EquityPoint, ExitReason, MetricsCalculator, TradeRecord, WalkForwardResult, WindowResult};
 use super::Portfolio;
 
 /// Configuration for backtesting
@@ -27,6 +27,9 @@ pub struct BacktestConfig {
     pub min_risk_reward: Decimal,
     pub risk_per_trade: Decimal,      // Risk % per trade (e.g., 0.05 for 5%, 0.12 for 12%)
     pub max_allocation: Decimal,      // Max % of capital per position (e.g., 0.60 for 60%, 0.90 for 90%)
+    pub max_correlated_positions: usize, // Max positions in same correlation group
+    pub walk_forward_windows: Option<usize>, // None = standard backtest, Some(n) = n windows
+    pub walk_forward_oos_pct: Decimal,       // Out-of-sample percentage (default 0.25)
 }
 
 impl Default for BacktestConfig {
@@ -43,7 +46,19 @@ impl Default for BacktestConfig {
             min_risk_reward: dec!(2.0),  // Require good R:R for quality trades
             risk_per_trade: dec!(0.05),  // Conservative 5% risk per trade
             max_allocation: dec!(0.60),  // Conservative 60% max allocation per position
+            max_correlated_positions: 2, // Max 2 positions in same correlation group
+            walk_forward_windows: None,  // Standard backtest by default
+            walk_forward_oos_pct: dec!(0.25), // 25% out-of-sample
         }
+    }
+}
+
+/// Returns the correlation group for a trading pair
+fn correlation_group(pair: TradingPair) -> &'static str {
+    match pair {
+        TradingPair::BTCUSDT => "btc",
+        TradingPair::ETHUSDT | TradingPair::SOLUSDT => "alt_major",
+        _ => "alt_minor",
     }
 }
 
@@ -59,6 +74,9 @@ pub struct BacktestEngine {
     trades: Vec<TradeRecord>,
     total_fees: Decimal,
     candles_processed: u64,
+    last_equity_date: Option<NaiveDate>,
+    first_prices: HashMap<TradingPair, Decimal>,
+    atr_indicators: HashMap<TradingPair, crate::indicators::atr::ATR>,
 }
 
 impl BacktestEngine {
@@ -82,10 +100,12 @@ impl BacktestEngine {
         let mut candle_buffers = HashMap::new();
         let mut current_prices = HashMap::new();
 
+        let mut atr_indicators = HashMap::new();
         for pair in &config.pairs {
             strategies.insert(*pair, factory(*pair));
             candle_buffers.insert(*pair, CandleBuffer::new(200));
             current_prices.insert(*pair, Decimal::ZERO);
+            atr_indicators.insert(*pair, crate::indicators::atr::ATR::new(14));
         }
 
         Self {
@@ -99,6 +119,9 @@ impl BacktestEngine {
             trades: Vec::new(),
             total_fees: Decimal::ZERO,
             candles_processed: 0,
+            last_equity_date: None,
+            first_prices: HashMap::new(),
+            atr_indicators,
         }
     }
 
@@ -124,7 +147,10 @@ impl BacktestEngine {
         // 4. Close any remaining positions at end
         self.close_all_positions()?;
 
-        // 5. Calculate and return results
+        // 5. Calculate benchmark (buy & hold equal-weight)
+        let benchmark_final = self.calculate_benchmark();
+
+        // 6. Calculate and return results
         let final_equity = self.portfolio.total_equity(&self.current_prices);
 
         let results = MetricsCalculator::calculate(
@@ -134,6 +160,7 @@ impl BacktestEngine {
             final_equity,
             &self.trades,
             &self.equity_curve,
+            benchmark_final,
         );
 
         info!(
@@ -142,6 +169,93 @@ impl BacktestEngine {
         );
 
         Ok(results)
+    }
+
+    /// Run walk-forward validation with n windows
+    pub async fn run_walk_forward(config: BacktestConfig, n_windows: usize) -> Result<WalkForwardResult> {
+        let total_days = (config.end_date - config.start_date).num_days();
+        let window_days = total_days / n_windows as i64;
+        let oos_pct_f64: f64 = config.walk_forward_oos_pct.try_into().unwrap_or(0.25);
+        let oos_days = (window_days as f64 * oos_pct_f64) as i64;
+        let is_days = window_days - oos_days;
+
+        info!("Walk-forward validation: {} windows, {} days each (IS: {}, OOS: {})",
+            n_windows, window_days, is_days, oos_days);
+
+        let mut windows = Vec::new();
+
+        for i in 0..n_windows {
+            let window_start = config.start_date + chrono::Duration::days(i as i64 * window_days);
+            let is_end = window_start + chrono::Duration::days(is_days);
+            let oos_start = is_end + chrono::Duration::days(1);
+            let oos_end = if i == n_windows - 1 {
+                config.end_date // Last window extends to end
+            } else {
+                window_start + chrono::Duration::days(window_days)
+            };
+
+            info!("Window {}: IS {} to {}, OOS {} to {}", i + 1, window_start, is_end, oos_start, oos_end);
+
+            // Run in-sample backtest
+            let is_config = BacktestConfig {
+                start_date: window_start,
+                end_date: is_end,
+                ..config.clone()
+            };
+            let mut is_engine = BacktestEngine::new(is_config);
+            let is_results = is_engine.run().await?;
+
+            // Run out-of-sample backtest (fresh strategies)
+            let oos_config = BacktestConfig {
+                start_date: oos_start,
+                end_date: oos_end,
+                ..config.clone()
+            };
+            let mut oos_engine = BacktestEngine::new(oos_config);
+            let oos_results = oos_engine.run().await?;
+
+            windows.push(WindowResult {
+                window_num: i + 1,
+                is_start: window_start,
+                is_end,
+                oos_start,
+                oos_end,
+                is_results,
+                oos_results,
+            });
+        }
+
+        // Aggregate results
+        let n = windows.len() as u32;
+        let aggregate_is_return_pct = windows.iter()
+            .map(|w| w.is_results.total_return_pct)
+            .sum::<Decimal>() / Decimal::from(n);
+        let aggregate_is_sharpe = windows.iter()
+            .map(|w| w.is_results.sharpe_ratio)
+            .sum::<Decimal>() / Decimal::from(n);
+        let aggregate_oos_return_pct = windows.iter()
+            .map(|w| w.oos_results.total_return_pct)
+            .sum::<Decimal>() / Decimal::from(n);
+        let aggregate_oos_sharpe = windows.iter()
+            .map(|w| w.oos_results.sharpe_ratio)
+            .sum::<Decimal>() / Decimal::from(n);
+
+        let overfitting_ratio = if !aggregate_oos_sharpe.is_zero() {
+            aggregate_is_sharpe / aggregate_oos_sharpe
+        } else if aggregate_is_sharpe > Decimal::ZERO {
+            Decimal::from(100) // OOS sharpe is 0 but IS isn't — extreme overfit
+        } else {
+            Decimal::ONE
+        };
+
+        Ok(WalkForwardResult {
+            windows,
+            aggregate_oos_return_pct,
+            aggregate_oos_sharpe,
+            aggregate_is_return_pct,
+            aggregate_is_sharpe,
+            overfitting_ratio,
+        })
     }
 
     async fn fetch_all_historical_data(&self) -> Result<HashMap<TradingPair, Vec<Candle>>> {
@@ -192,30 +306,46 @@ impl BacktestEngine {
         let pair = candle.pair;
         let price = candle.close;
 
-        // 1. Update current price
+        // 1. Update current price and track first price per pair (for benchmark)
         self.current_prices.insert(pair, price);
+        self.first_prices.entry(pair).or_insert(price);
 
-        // 2. Update candle buffer for this pair
+        // 2. Update candle buffer and ATR for this pair
         if let Some(buffer) = self.candle_buffers.get_mut(&pair) {
             buffer.push(candle.clone());
         }
+        if let Some(atr) = self.atr_indicators.get_mut(&pair) {
+            atr.update(candle.high, candle.low, candle.close);
+        }
 
-        // 3. Update position prices and check stops using candle high/low
+        // 3. Feed BTC candles to cross-asset correlation strategies
+        if pair == TradingPair::BTCUSDT {
+            // Clone candle before mutable borrow of strategies
+            let btc_candle = candle.clone();
+            for (strat_pair, strategy) in self.strategies.iter_mut() {
+                if *strat_pair != TradingPair::BTCUSDT {
+                    strategy.update_btc_candle(btc_candle.clone());
+                }
+            }
+        }
+
+        // 4. Update position prices and check stops using candle high/low
         self.portfolio.update_position_price(pair, price);
         self.check_stops(pair, &candle)?;
 
-        // 4. Run strategy analysis
+        // 5. Run strategy analysis
         self.run_strategy(pair, price, candle.open_time)?;
 
-        // 5. Update drawdown and check emergency stop
+        // 6. Update drawdown and check emergency stop
         self.portfolio.update_drawdown(&self.current_prices);
         if self.portfolio.max_drawdown > dec!(15) {
             self.close_all_positions()?;
         }
 
-        // 6. Record equity point periodically (every 100 candles to save memory)
+        // 7. Record equity point once per calendar day (for proper daily Sharpe calculation)
         self.candles_processed += 1;
-        if self.candles_processed % 100 == 0 {
+        let candle_date = candle.open_time.date_naive();
+        if self.last_equity_date.map_or(true, |d| d != candle_date) {
             let equity = self.portfolio.total_equity(&self.current_prices);
             let drawdown = self.portfolio.max_drawdown;
             self.equity_curve.push(EquityPoint {
@@ -223,6 +353,7 @@ impl BacktestEngine {
                 equity,
                 drawdown_pct: drawdown,
             });
+            self.last_equity_date = Some(candle_date);
         }
 
         Ok(())
@@ -283,6 +414,19 @@ impl BacktestEngine {
             side, has_position, signal.pair
         );
 
+        // Check correlation limits before opening
+        if side == Some(Side::Buy) && !has_position {
+            let group = correlation_group(signal.pair);
+            let correlated_count = self.portfolio.get_open_positions().iter()
+                .filter(|p| correlation_group(p.pair) == group)
+                .count();
+            if correlated_count >= self.config.max_correlated_positions {
+                debug!("Signal rejected: {} correlated positions in group '{}' >= max {}",
+                    correlated_count, group, self.config.max_correlated_positions);
+                return Ok(());
+            }
+        }
+
         match (side, has_position) {
             (Some(Side::Buy), false) => {
                 debug!("Opening position for {}", signal.pair);
@@ -335,7 +479,16 @@ impl BacktestEngine {
         let max_affordable_qty = max_allocation / (execution_price * fee_multiplier);
 
         // Use the smaller of risk-based or max affordable
-        let quantity = risk_based_qty.min(max_affordable_qty);
+        let mut quantity = risk_based_qty.min(max_affordable_qty);
+
+        // Apply volatility-adjusted sizing via ATR
+        if let Some(atr) = self.atr_indicators.get(&signal.pair) {
+            if let Some(vol_level) = atr.volatility_level(price) {
+                let factor = vol_level.position_size_factor();
+                quantity = quantity * factor;
+                debug!("[{}] ATR sizing: {:?} -> {:.1}x", signal.pair, vol_level, factor);
+            }
+        }
 
         // Calculate fee
         let notional = quantity * execution_price;
@@ -484,6 +637,27 @@ impl BacktestEngine {
         );
 
         Ok(())
+    }
+
+    /// Calculate buy-and-hold benchmark: equal-weight allocation across all pairs
+    fn calculate_benchmark(&self) -> Decimal {
+        let n_pairs = self.config.pairs.len();
+        if n_pairs == 0 {
+            return self.config.initial_capital;
+        }
+
+        let allocation_per_pair = self.config.initial_capital / Decimal::from(n_pairs as u32);
+        let mut benchmark_equity = Decimal::ZERO;
+
+        for pair in &self.config.pairs {
+            let first = self.first_prices.get(pair).copied().unwrap_or(Decimal::ONE);
+            let last = self.current_prices.get(pair).copied().unwrap_or(first);
+            if !first.is_zero() {
+                benchmark_equity += allocation_per_pair * (last / first);
+            }
+        }
+
+        benchmark_equity
     }
 
     fn close_all_positions(&mut self) -> Result<()> {

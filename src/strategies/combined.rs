@@ -1,18 +1,36 @@
 use rust_decimal::Decimal;
-use crate::types::{CandleBuffer, Signal, TradingPair};
+use crate::indicators::Indicator;
+use crate::indicators::atr::{ATR, VolatilityLevel};
+use crate::types::{Candle, CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
 use super::trend::{TrendStrategy, BreakoutStrategy};
 use super::momentum::{MomentumStrategy, VolumeBreakoutStrategy};
 use super::mean_reversion::{MeanReversionStrategy, RSIDivergenceStrategy};
 
+/// Strategy index labels for weight adjustment
+/// Each asset's strategies are indexed in the order they appear in the `strategies` vec.
+/// The regime detection needs to know which index corresponds to "trend" vs "mean_reversion"
+/// so it can shift weights appropriately.
+#[derive(Debug, Clone, Copy)]
+struct StrategyLayout {
+    trend_idx: Option<usize>,
+    momentum_idx: Option<usize>,
+    mean_reversion_idx: Option<usize>,
+}
+
 /// Combined Strategy that aggregates signals from multiple strategies
-/// with asset-specific weighting
+/// with asset-specific weighting and regime-aware dynamic weight adjustment
 pub struct CombinedStrategy {
     name: String,
     pair: TradingPair,
     strategies: Vec<Box<dyn Strategy>>,
+    base_weights: Vec<Decimal>,
     weights: Vec<Decimal>,
     min_agreement: Decimal,
+    layout: StrategyLayout,
+    atr: ATR,
+    btc_correlation: Option<BTCCorrelationStrategy>,
+    btc_correlation_weight: Decimal,
 }
 
 impl CombinedStrategy {
@@ -33,8 +51,13 @@ impl CombinedStrategy {
             name: "Combined_BTC".to_string(),
             pair,
             strategies,
+            base_weights: weights.clone(),
             weights,
             min_agreement: Decimal::new(60, 2),
+            layout: StrategyLayout { trend_idx: Some(0), momentum_idx: None, mean_reversion_idx: Some(2) },
+            atr: ATR::new(14),
+            btc_correlation: None,
+            btc_correlation_weight: Decimal::ZERO,
         }
     }
 
@@ -45,18 +68,25 @@ impl CombinedStrategy {
             Box::new(MomentumStrategy::new(pair)),
             Box::new(MeanReversionStrategy::new(pair)),
         ];
+        // Weights adjusted to leave room for BTC correlation (15%)
         let weights = vec![
-            Decimal::new(40, 2), // 40% trend
-            Decimal::new(35, 2), // 35% momentum
-            Decimal::new(25, 2), // 25% mean reversion
+            Decimal::new(35, 2), // 35% trend
+            Decimal::new(30, 2), // 30% momentum
+            Decimal::new(20, 2), // 20% mean reversion
         ];
+        // Remaining 15% goes to BTC correlation strategy
 
         Self {
             name: "Combined_ETH".to_string(),
             pair,
             strategies,
+            base_weights: weights.clone(),
             weights,
             min_agreement: Decimal::new(55, 2),
+            layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
+            atr: ATR::new(14),
+            btc_correlation: Some(BTCCorrelationStrategy::new()),
+            btc_correlation_weight: Decimal::new(15, 2), // 15%
         }
     }
 
@@ -79,8 +109,13 @@ impl CombinedStrategy {
             name: "Combined_SOL".to_string(),
             pair,
             strategies,
+            base_weights: weights.clone(),
             weights,
             min_agreement: Decimal::new(50, 2),
+            layout: StrategyLayout { trend_idx: None, momentum_idx: Some(0), mean_reversion_idx: Some(2) },
+            atr: ATR::new(14),
+            btc_correlation: None,
+            btc_correlation_weight: Decimal::ZERO,
         }
     }
 
@@ -100,13 +135,82 @@ impl CombinedStrategy {
             name: format!("Combined_{}", pair.base_asset()),
             pair,
             strategies,
+            base_weights: weights.clone(),
             weights,
             min_agreement: Decimal::new(55, 2),
+            layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
+            atr: ATR::new(14),
+            btc_correlation: None,
+            btc_correlation_weight: Decimal::ZERO,
         }
     }
 
-    fn aggregate_signals(&self, signals: &[StrategySignal]) -> Option<StrategySignal> {
-        if signals.is_empty() {
+    /// Update regime detection and adjust strategy weights based on volatility
+    fn update_regime(&mut self, candle: &Candle) {
+        self.atr.update(candle.high, candle.low, candle.close);
+
+        let vol_level = match self.atr.volatility_level(candle.close) {
+            Some(v) => v,
+            None => return, // ATR not ready yet, keep base weights
+        };
+
+        // Adjust weights based on regime
+        let mut adjusted = self.base_weights.clone();
+        let shift = Decimal::new(15, 2); // 15% weight shift
+
+        match vol_level {
+            VolatilityLevel::Low => {
+                // Ranging market: boost mean reversion, reduce trend
+                if let Some(mr_idx) = self.layout.mean_reversion_idx {
+                    if let Some(w) = adjusted.get_mut(mr_idx) { *w += shift; }
+                }
+                if let Some(t_idx) = self.layout.trend_idx {
+                    if let Some(w) = adjusted.get_mut(t_idx) { *w -= shift; }
+                } else if let Some(m_idx) = self.layout.momentum_idx {
+                    if let Some(w) = adjusted.get_mut(m_idx) { *w -= shift; }
+                }
+            }
+            VolatilityLevel::Medium => {
+                // Normal: use base weights (no change)
+            }
+            VolatilityLevel::High => {
+                // Trending market: boost trend, reduce mean reversion
+                if let Some(t_idx) = self.layout.trend_idx {
+                    if let Some(w) = adjusted.get_mut(t_idx) { *w += shift; }
+                } else if let Some(m_idx) = self.layout.momentum_idx {
+                    if let Some(w) = adjusted.get_mut(m_idx) { *w += shift; }
+                }
+                if let Some(mr_idx) = self.layout.mean_reversion_idx {
+                    if let Some(w) = adjusted.get_mut(mr_idx) { *w -= shift; }
+                }
+            }
+            VolatilityLevel::Extreme => {
+                // Extreme: boost momentum, reduce all others proportionally
+                if let Some(m_idx) = self.layout.momentum_idx {
+                    if let Some(w) = adjusted.get_mut(m_idx) { *w += Decimal::new(10, 2); }
+                    // Reduce others proportionally
+                    let reduction = Decimal::new(10, 2) / Decimal::from((adjusted.len() - 1) as u32);
+                    for (i, w) in adjusted.iter_mut().enumerate() {
+                        if i != m_idx {
+                            *w -= reduction;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ensure no weight goes negative
+        for w in adjusted.iter_mut() {
+            if *w < Decimal::ZERO {
+                *w = Decimal::ZERO;
+            }
+        }
+
+        self.weights = adjusted;
+    }
+
+    fn aggregate_signals(&self, signals: &[StrategySignal], btc_signal: Option<&StrategySignal>) -> Option<StrategySignal> {
+        if signals.is_empty() && btc_signal.is_none() {
             return None;
         }
 
@@ -118,6 +222,7 @@ impl CombinedStrategy {
         let mut best_entry = None;
         let mut best_sl = None;
         let mut best_tp = None;
+        let mut best_confidence = Decimal::ZERO;
 
         for (i, signal) in signals.iter().enumerate() {
             let weight = self.weights.get(i).copied().unwrap_or(Decimal::ONE / Decimal::from(signals.len() as u32));
@@ -131,11 +236,23 @@ impl CombinedStrategy {
                 signal.strategy_name, signal.signal, signal.confidence * Decimal::from(100)));
 
             // Use levels from highest confidence signal
-            if best_entry.is_none() || signal.confidence > total_confidence / total_weight {
+            if signal.confidence > best_confidence {
+                best_confidence = signal.confidence;
                 best_entry = signal.suggested_entry;
                 best_sl = signal.suggested_stop_loss;
                 best_tp = signal.suggested_take_profit;
             }
+        }
+
+        // Include BTC correlation signal if available
+        if let Some(btc_sig) = btc_signal {
+            let weight = self.btc_correlation_weight;
+            let strength = Decimal::from(btc_sig.signal.strength() as i32);
+            weighted_strength += strength * weight * btc_sig.confidence;
+            total_weight += weight;
+            total_confidence += btc_sig.confidence * weight;
+            reasons.push(format!("{}: {:?} ({:.0}%)",
+                btc_sig.strategy_name, btc_sig.signal, btc_sig.confidence * Decimal::from(100)));
         }
 
         if total_weight.is_zero() {
@@ -186,6 +303,11 @@ impl Strategy for CombinedStrategy {
     }
 
     fn analyze(&mut self, candles: &CandleBuffer) -> Option<StrategySignal> {
+        // Update regime detection from latest candle
+        if let Some(latest) = candles.last() {
+            self.update_regime(latest);
+        }
+
         let mut signals = Vec::new();
 
         for strategy in &mut self.strategies {
@@ -194,7 +316,11 @@ impl Strategy for CombinedStrategy {
             }
         }
 
-        self.aggregate_signals(&signals)
+        // Get BTC correlation signal if available
+        let btc_signal = self.btc_correlation.as_mut()
+            .and_then(|btc| btc.analyze(candles));
+
+        self.aggregate_signals(&signals, btc_signal.as_ref())
     }
 
     fn min_candles_required(&self) -> usize {
@@ -208,6 +334,17 @@ impl Strategy for CombinedStrategy {
     fn reset(&mut self) {
         for strategy in &mut self.strategies {
             strategy.reset();
+        }
+        if let Some(btc) = &mut self.btc_correlation {
+            btc.reset();
+        }
+        self.weights = self.base_weights.clone();
+        self.atr.reset();
+    }
+
+    fn update_btc_candle(&mut self, candle: Candle) {
+        if let Some(btc) = &mut self.btc_correlation {
+            btc.update_btc(candle);
         }
     }
 }
@@ -233,7 +370,7 @@ impl BTCCorrelationStrategy {
         }
     }
 
-    pub fn update_btc(&mut self, candle: crate::types::Candle) {
+    pub fn update_btc(&mut self, candle: Candle) {
         self.btc_candles.push(candle);
     }
 
@@ -281,7 +418,7 @@ impl Strategy for BTCCorrelationStrategy {
             ));
         }
 
-        let current = candles.last()?;
+        let _current = candles.last()?;
 
         let (signal, confidence, reason) = if btc_change > Decimal::from(2) {
             (

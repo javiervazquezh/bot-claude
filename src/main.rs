@@ -71,6 +71,9 @@ enum Commands {
         /// Save trades to database for dashboard visualization
         #[arg(long)]
         save_to_db: bool,
+        /// Run walk-forward validation with N windows
+        #[arg(long)]
+        walk_forward: Option<usize>,
     },
     /// Show current market prices
     Prices,
@@ -108,8 +111,12 @@ async fn main() -> Result<()> {
         Commands::Live => {
             error!("Live trading not yet implemented. Use paper trading mode first.");
         }
-        Commands::Backtest { start, end, save_to_db } => {
-            run_backtest(&start, &end, save_to_db).await?;
+        Commands::Backtest { start, end, save_to_db, walk_forward } => {
+            if let Some(n_windows) = walk_forward {
+                run_walk_forward_backtest(&start, &end, n_windows).await?;
+            } else {
+                run_backtest(&start, &end, save_to_db).await?;
+            }
         }
         Commands::Prices => {
             show_prices().await?;
@@ -558,6 +565,9 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
             min_risk_reward: dec!(2.0),
             risk_per_trade: dec!(0.05),
             max_allocation: dec!(0.60),
+            max_correlated_positions: 2,
+            walk_forward_windows: None,
+            walk_forward_oos_pct: dec!(0.25),
         };
 
         let mut engine = BacktestEngine::new(config);
@@ -634,6 +644,9 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         min_risk_reward: dec!(2.0),  // Conservative 5-Year: 2.0 R:R
         risk_per_trade: dec!(0.05),  // Conservative: 5% risk per trade
         max_allocation: dec!(0.60),  // Conservative: 60% max allocation per position
+        max_correlated_positions: 2,
+        walk_forward_windows: None,
+        walk_forward_oos_pct: dec!(0.25),
     };
     let mut engine1 = BacktestEngine::new(conservative_no_pm);
     let results1 = engine1.run().await?;
@@ -662,6 +675,9 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         min_risk_reward: dec!(2.0),  // Conservative 5-Year: 2.0 R:R
         risk_per_trade: dec!(0.05),  // Conservative: 5% risk per trade
         max_allocation: dec!(0.60),  // Conservative: 60% max allocation per position
+        max_correlated_positions: 2,
+        walk_forward_windows: None,
+        walk_forward_oos_pct: dec!(0.25),
     };
     let mut engine2 = BacktestEngine::new(conservative_with_pm);
     let results2 = engine2.run().await?;
@@ -690,6 +706,9 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         min_risk_reward: dec!(2.0),  // Ultra Aggressive: 2.0 R:R
         risk_per_trade: dec!(0.12),  // Ultra Aggressive: 12% risk per trade
         max_allocation: dec!(0.90),  // Ultra Aggressive: 90% max allocation per position
+        max_correlated_positions: 3,
+        walk_forward_windows: None,
+        walk_forward_oos_pct: dec!(0.25),
     };
     let mut engine3 = BacktestEngine::new(aggressive_no_pm);
     let results3 = engine3.run().await?;
@@ -718,6 +737,9 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         min_risk_reward: dec!(2.0),  // Ultra Aggressive: 2.0 R:R
         risk_per_trade: dec!(0.12),  // Ultra Aggressive: 12% risk per trade
         max_allocation: dec!(0.90),  // Ultra Aggressive: 90% max allocation per position
+        max_correlated_positions: 3,
+        walk_forward_windows: None,
+        walk_forward_oos_pct: dec!(0.25),
     };
     let mut engine4 = BacktestEngine::new(aggressive_with_pm);
     let results4 = engine4.run().await?;
@@ -730,17 +752,17 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
     info!("\n\n{}", "=".repeat(80));
     info!("COMPARISON SUMMARY");
     info!("{}", "=".repeat(80));
-    println!("\n{:<45} {:>12} {:>12} {:>10} {:>10}", "Scenario", "Final Equity", "Return %", "Max DD %", "Sharpe");
-    println!("{}", "-".repeat(93));
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2}",
-        "Conservative 5-Year WITHOUT PM", results1.final_equity, results1.total_return_pct, results1.max_drawdown_pct, results1.sharpe_ratio);
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2}",
-        "Conservative 5-Year WITH PM", results2.final_equity, results2.total_return_pct, results2.max_drawdown_pct, results2.sharpe_ratio);
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2}",
-        "Ultra Aggressive WITHOUT PM", results3.final_equity, results3.total_return_pct, results3.max_drawdown_pct, results3.sharpe_ratio);
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2}",
-        "Ultra Aggressive WITH PM", results4.final_equity, results4.total_return_pct, results4.max_drawdown_pct, results4.sharpe_ratio);
-    println!("{}", "=".repeat(88));
+    println!("\n{:<45} {:>12} {:>12} {:>10} {:>10} {:>10}", "Scenario", "Final Equity", "Return %", "Max DD %", "Sharpe", "Alpha %");
+    println!("{}", "-".repeat(103));
+    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Conservative 5-Year WITHOUT PM", results1.final_equity, results1.total_return_pct, results1.max_drawdown_pct, results1.sharpe_ratio, results1.alpha_pct);
+    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Conservative 5-Year WITH PM", results2.final_equity, results2.total_return_pct, results2.max_drawdown_pct, results2.sharpe_ratio, results2.alpha_pct);
+    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Ultra Aggressive WITHOUT PM", results3.final_equity, results3.total_return_pct, results3.max_drawdown_pct, results3.sharpe_ratio, results3.alpha_pct);
+    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Ultra Aggressive WITH PM", results4.final_equity, results4.total_return_pct, results4.max_drawdown_pct, results4.sharpe_ratio, results4.alpha_pct);
+    println!("{}", "=".repeat(103));
 
     // Calculate improvements
     let conservative_improvement = ((results2.total_return_pct - results1.total_return_pct) / results1.total_return_pct) * dec!(100);
@@ -753,6 +775,54 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         conservative_improvement, conservative_dd_improvement);
     println!("  Aggressive: Return improved by {:.2}%, Drawdown reduced by {:.2}%",
         aggressive_improvement, aggressive_dd_improvement);
+
+    Ok(())
+}
+
+async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize) -> Result<()> {
+    let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
+    let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .map_err(|_| anyhow!("Invalid end date format. Use YYYY-MM-DD"))?;
+
+    if end_date <= start_date {
+        return Err(anyhow!("End date must be after start date"));
+    }
+
+    if n_windows < 2 {
+        return Err(anyhow!("Walk-forward requires at least 2 windows"));
+    }
+
+    info!("=== Walk-Forward Validation ===");
+    info!("Period: {} to {}", start_date, end_date);
+    info!("Windows: {}", n_windows);
+    info!("Pairs: BTC, ETH, SOL");
+    info!("Timeframe: 4-hour");
+    println!();
+
+    let config = BacktestConfig {
+        start_date,
+        end_date,
+        initial_capital: Decimal::from(2000),
+        timeframe: TimeFrame::H4,
+        pairs: vec![
+            TradingPair::BTCUSDT,
+            TradingPair::ETHUSDT,
+            TradingPair::SOLUSDT,
+        ],
+        fee_rate: dec!(0.001),
+        slippage_rate: dec!(0.0005),
+        min_confidence: dec!(0.65),
+        min_risk_reward: dec!(2.0),
+        risk_per_trade: dec!(0.05),
+        max_allocation: dec!(0.60),
+        max_correlated_positions: 2,
+        walk_forward_windows: Some(n_windows),
+        walk_forward_oos_pct: dec!(0.25),
+    };
+
+    let result = BacktestEngine::run_walk_forward(config, n_windows).await?;
+    result.print_summary();
 
     Ok(())
 }

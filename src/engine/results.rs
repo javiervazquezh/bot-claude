@@ -47,6 +47,12 @@ pub struct BacktestResults {
     // Per-Pair Statistics
     pub pair_stats: HashMap<TradingPair, PairStats>,
 
+    // Benchmark (Buy & Hold)
+    pub benchmark_return_pct: Decimal,
+    pub benchmark_final_equity: Decimal,
+    pub benchmark_max_drawdown_pct: Decimal,
+    pub alpha_pct: Decimal,
+
     // Time Series Data
     pub equity_curve: Vec<EquityPoint>,
     pub trades: Vec<TradeRecord>,
@@ -80,6 +86,11 @@ impl BacktestResults {
         println!("  Largest Win:        ${:.2}", self.largest_win);
         println!("  Largest Loss:       ${:.2}", self.largest_loss);
         println!("  Total Fees:         ${:.2}", self.total_fees);
+        println!("{}", "-".repeat(60));
+        println!("BENCHMARK (Buy & Hold)");
+        println!("  B&H Return:         {:.2}%", self.benchmark_return_pct);
+        println!("  B&H Final Equity:   ${:.2}", self.benchmark_final_equity);
+        println!("  Strategy Alpha:     {:.2}%", self.alpha_pct);
         println!("{}", "-".repeat(60));
         println!("BY PAIR");
         for (pair, stats) in &self.pair_stats {
@@ -195,6 +206,52 @@ impl std::fmt::Display for ExitReason {
     }
 }
 
+/// Walk-forward validation results
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardResult {
+    pub windows: Vec<WindowResult>,
+    pub aggregate_oos_return_pct: Decimal,
+    pub aggregate_oos_sharpe: Decimal,
+    pub aggregate_is_return_pct: Decimal,
+    pub aggregate_is_sharpe: Decimal,
+    pub overfitting_ratio: Decimal,
+}
+
+impl WalkForwardResult {
+    pub fn print_summary(&self) {
+        println!("\n{}", "=".repeat(80));
+        println!("                    WALK-FORWARD VALIDATION RESULTS");
+        println!("{}", "=".repeat(80));
+        println!("{:<8} {:>14} {:>14} {:>14} {:>14}", "Window", "IS Return %", "IS Sharpe", "OOS Return %", "OOS Sharpe");
+        println!("{}", "-".repeat(80));
+        for w in &self.windows {
+            println!("{:<8} {:>13.2}% {:>14.2} {:>13.2}% {:>14.2}",
+                format!("#{}", w.window_num),
+                w.is_results.total_return_pct, w.is_results.sharpe_ratio,
+                w.oos_results.total_return_pct, w.oos_results.sharpe_ratio);
+        }
+        println!("{}", "-".repeat(80));
+        println!("{:<8} {:>13.2}% {:>14.2} {:>13.2}% {:>14.2}",
+            "Avg", self.aggregate_is_return_pct, self.aggregate_is_sharpe,
+            self.aggregate_oos_return_pct, self.aggregate_oos_sharpe);
+        println!("{}", "-".repeat(80));
+        println!("Overfitting Ratio (IS/OOS Sharpe): {:.2} (closer to 1.0 = less overfit)", self.overfitting_ratio);
+        println!("{}", "=".repeat(80));
+    }
+}
+
+/// Single window in walk-forward validation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowResult {
+    pub window_num: usize,
+    pub is_start: NaiveDate,
+    pub is_end: NaiveDate,
+    pub oos_start: NaiveDate,
+    pub oos_end: NaiveDate,
+    pub is_results: BacktestResults,
+    pub oos_results: BacktestResults,
+}
+
 /// Calculator for backtest metrics
 pub struct MetricsCalculator;
 
@@ -207,6 +264,7 @@ impl MetricsCalculator {
         final_equity: Decimal,
         trades: &[TradeRecord],
         equity_curve: &[EquityPoint],
+        benchmark_final_equity: Decimal,
     ) -> BacktestResults {
         let total_trades = trades.len() as u64;
         let winning_trades: Vec<_> = trades.iter().filter(|t| t.pnl > Decimal::ZERO).collect();
@@ -295,8 +353,8 @@ impl MetricsCalculator {
             .max()
             .unwrap_or(Decimal::ZERO);
 
-        // Calculate Sharpe, Sortino, Calmar ratios
-        let (sharpe_ratio, sortino_ratio) = Self::calculate_ratios(trades, initial_capital);
+        // Calculate Sharpe, Sortino, Calmar ratios (from daily equity returns)
+        let (sharpe_ratio, sortino_ratio) = Self::calculate_ratios(trades, initial_capital, equity_curve);
 
         let calmar_ratio = if !max_drawdown_pct.is_zero() {
             annualized_return_pct / max_drawdown_pct
@@ -314,6 +372,16 @@ impl MetricsCalculator {
                 .or_insert_with(|| PairStats::new(trade.pair))
                 .add_trade(trade.pnl);
         }
+
+        // Benchmark (Buy & Hold) metrics
+        let benchmark_return_pct = if !initial_capital.is_zero() {
+            ((benchmark_final_equity - initial_capital) / initial_capital) * dec!(100)
+        } else {
+            Decimal::ZERO
+        };
+        let alpha_pct = total_return_pct - benchmark_return_pct;
+        // Benchmark max drawdown is computed by caller; use 0 as placeholder here
+        let benchmark_max_drawdown_pct = Decimal::ZERO;
 
         BacktestResults {
             start_date,
@@ -341,26 +409,86 @@ impl MetricsCalculator {
             gross_loss,
             net_profit,
             total_fees,
+            benchmark_return_pct,
+            benchmark_final_equity,
+            benchmark_max_drawdown_pct,
+            alpha_pct,
             pair_stats,
             equity_curve: equity_curve.to_vec(),
             trades: trades.to_vec(),
         }
     }
 
-    /// Calculate Sharpe and Sortino ratios from trade returns
-    fn calculate_ratios(trades: &[TradeRecord], initial_capital: Decimal) -> (Decimal, Decimal) {
-        if trades.is_empty() {
-            return (Decimal::ZERO, Decimal::ZERO);
+    /// Calculate Sharpe and Sortino ratios from daily equity returns
+    fn calculate_ratios(trades: &[TradeRecord], initial_capital: Decimal, equity_curve: &[EquityPoint]) -> (Decimal, Decimal) {
+        // Prefer daily equity returns (correct methodology)
+        // Fall back to per-trade returns only if equity curve has < 2 days
+        let returns = Self::daily_returns_from_equity(initial_capital, equity_curve);
+
+        if returns.len() < 2 {
+            // Fallback: per-trade returns (less accurate but better than nothing)
+            let trade_returns: Vec<f64> = trades
+                .iter()
+                .map(|t| {
+                    let pnl_pct: f64 = t.pnl_pct.try_into().unwrap_or(0.0);
+                    pnl_pct / 100.0
+                })
+                .collect();
+            if trade_returns.is_empty() {
+                return (Decimal::ZERO, Decimal::ZERO);
+            }
+            return Self::compute_sharpe_sortino(&trade_returns, 365.0);
         }
 
-        // Calculate returns as percentage
-        let returns: Vec<f64> = trades
-            .iter()
-            .map(|t| {
-                let pnl_pct: f64 = t.pnl_pct.try_into().unwrap_or(0.0);
-                pnl_pct / 100.0
+        Self::compute_sharpe_sortino(&returns, 365.0)
+    }
+
+    /// Extract daily returns from equity curve points
+    fn daily_returns_from_equity(initial_capital: Decimal, equity_curve: &[EquityPoint]) -> Vec<f64> {
+        if equity_curve.is_empty() {
+            return Vec::new();
+        }
+
+        // Group equity points by calendar date, take last per day
+        let mut daily_equity: Vec<f64> = Vec::new();
+        let mut last_date = None;
+
+        // Start with initial capital as day 0
+        let init_cap: f64 = initial_capital.try_into().unwrap_or(1.0);
+        daily_equity.push(init_cap);
+
+        for point in equity_curve {
+            let date = point.timestamp.date_naive();
+            let eq: f64 = point.equity.try_into().unwrap_or(0.0);
+
+            if last_date.map_or(true, |d| d != date) {
+                daily_equity.push(eq);
+                last_date = Some(date);
+            } else {
+                // Same date: update to latest value
+                if let Some(last) = daily_equity.last_mut() {
+                    *last = eq;
+                }
+            }
+        }
+
+        // Compute daily returns: r_t = (E_t - E_{t-1}) / E_{t-1}
+        daily_equity.windows(2)
+            .map(|w| {
+                if w[0] > 0.0 {
+                    (w[1] - w[0]) / w[0]
+                } else {
+                    0.0
+                }
             })
-            .collect();
+            .collect()
+    }
+
+    /// Compute Sharpe and Sortino from a returns series
+    fn compute_sharpe_sortino(returns: &[f64], annualization_days: f64) -> (Decimal, Decimal) {
+        if returns.is_empty() {
+            return (Decimal::ZERO, Decimal::ZERO);
+        }
 
         let n = returns.len() as f64;
         let mean_return = returns.iter().sum::<f64>() / n;
@@ -369,24 +497,21 @@ impl MetricsCalculator {
         let variance = returns.iter().map(|r| (r - mean_return).powi(2)).sum::<f64>() / n;
         let std_dev = variance.sqrt();
 
-        // Sharpe ratio (assuming risk-free rate of 0)
+        // Sharpe ratio (risk-free rate = 0, annualized with sqrt(365) for crypto)
         let sharpe = if std_dev > 0.0 {
-            (mean_return / std_dev) * (252_f64).sqrt() // Annualized
+            (mean_return / std_dev) * annualization_days.sqrt()
         } else {
             0.0
         };
 
-        // Downside deviation (for Sortino)
-        let negative_returns: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
-        let downside_variance = if !negative_returns.is_empty() {
-            negative_returns.iter().map(|r| r.powi(2)).sum::<f64>() / negative_returns.len() as f64
-        } else {
-            0.0
-        };
+        // Downside deviation (for Sortino) — uses all returns, zeroing positive ones
+        let downside_variance = returns.iter()
+            .map(|&r| if r < 0.0 { r.powi(2) } else { 0.0 })
+            .sum::<f64>() / n;
         let downside_dev = downside_variance.sqrt();
 
         let sortino = if downside_dev > 0.0 {
-            (mean_return / downside_dev) * (252_f64).sqrt()
+            (mean_return / downside_dev) * annualization_days.sqrt()
         } else if mean_return > 0.0 {
             100.0
         } else {

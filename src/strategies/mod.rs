@@ -11,7 +11,7 @@ pub use combined::*;
 pub use improved::*;
 
 use rust_decimal::Decimal;
-use crate::types::{CandleBuffer, Signal, Side, TradingPair};
+use crate::types::{Candle, CandleBuffer, Signal, Side, TradingPair};
 
 pub trait Strategy: Send + Sync {
     fn name(&self) -> &str;
@@ -19,6 +19,8 @@ pub trait Strategy: Send + Sync {
     fn analyze(&mut self, candles: &CandleBuffer) -> Option<StrategySignal>;
     fn min_candles_required(&self) -> usize;
     fn reset(&mut self);
+    /// Feed a BTC candle for cross-asset correlation strategies (default: no-op)
+    fn update_btc_candle(&mut self, _candle: Candle) {}
 }
 
 #[derive(Debug, Clone)]
