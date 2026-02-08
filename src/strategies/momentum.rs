@@ -1,5 +1,7 @@
 use rust_decimal::Decimal;
 use crate::indicators::{ATR, EMA, RSI, VolumeProfile, Indicator};
+use crate::indicators::volume::OBV;
+use crate::indicators::rsi::StochasticRSI;
 use crate::types::{CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
 
@@ -14,6 +16,10 @@ pub struct MomentumStrategy {
     ema_slow: EMA,
     volume_profile: VolumeProfile,
     atr: ATR,
+    obv: OBV,
+    prev_obv: Option<Decimal>,
+    stoch_rsi: StochasticRSI,
+    last_stoch_k: Option<Decimal>,
     rsi_overbought: Decimal,
     rsi_oversold: Decimal,
     volume_threshold: Decimal,
@@ -30,6 +36,10 @@ impl MomentumStrategy {
             ema_slow: EMA::new(21),
             volume_profile: VolumeProfile::new(20),
             atr: ATR::new(14),
+            obv: OBV::new(),
+            prev_obv: None,
+            stoch_rsi: StochasticRSI::new(14, 14, 3, 3),
+            last_stoch_k: None,
             rsi_overbought: Decimal::from(70),
             rsi_oversold: Decimal::from(30),
             volume_threshold: Decimal::new(15, 1), // 1.5x average volume
@@ -46,6 +56,10 @@ impl MomentumStrategy {
             ema_slow: EMA::new(13),
             volume_profile: VolumeProfile::new(14),
             atr: ATR::new(10),
+            obv: OBV::new(),
+            prev_obv: None,
+            stoch_rsi: StochasticRSI::new(14, 14, 3, 3),
+            last_stoch_k: None,
             rsi_overbought: Decimal::from(65),
             rsi_oversold: Decimal::from(35),
             volume_threshold: Decimal::new(12, 1),
@@ -105,6 +119,11 @@ impl Strategy for MomentumStrategy {
             self.ema_slow.update(c.close);
             self.volume_profile.update(c.volume);
             self.atr.update(c.high, c.low, c.close);
+            self.prev_obv = Some(self.obv.value());
+            self.obv.update(c.close, c.volume);
+            if let Some((k, _d)) = self.stoch_rsi.update(c.close) {
+                self.last_stoch_k = Some(k);
+            }
         }
         self.candles_processed = len;
 
@@ -142,6 +161,37 @@ impl Strategy for MomentumStrategy {
             confidence -= Decimal::new(10, 2);
         }
 
+        // OBV confirmation: rising OBV with rising price = confirmation, divergence = warning
+        if let Some(prev) = self.prev_obv {
+            let obv_rising = self.obv.value() > prev;
+            let price_rising = price_above_fast;
+            if obv_rising == price_rising {
+                confidence += Decimal::new(10, 2); // OBV confirms direction
+            } else {
+                confidence -= Decimal::new(10, 2); // OBV divergence warning
+            }
+        }
+
+        // StochasticRSI overbought/oversold warning
+        if let Some(k) = self.last_stoch_k {
+            match signal {
+                Signal::StrongBuy | Signal::Buy => {
+                    if k > Decimal::from(80) {
+                        confidence -= Decimal::new(15, 2); // Overbought warning
+                    }
+                }
+                Signal::StrongSell | Signal::Sell => {
+                    if k < Decimal::from(20) {
+                        confidence -= Decimal::new(15, 2); // Oversold warning
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Clamp confidence
+        confidence = confidence.max(Decimal::new(10, 2)).min(Decimal::new(95, 2));
+
         let entry = current.close;
         let (stop_loss, take_profit) = match signal {
             Signal::StrongBuy | Signal::Buy => {
@@ -157,9 +207,18 @@ impl Strategy for MomentumStrategy {
             _ => (entry, entry),
         };
 
+        let obv_str = if let Some(prev) = self.prev_obv {
+            let dir = if self.obv.value() > prev { "rising" } else { "falling" };
+            format!(", OBV: {}", dir)
+        } else {
+            String::new()
+        };
+        let stoch_str = self.last_stoch_k
+            .map(|k| format!(", StochRSI K: {:.0}", k))
+            .unwrap_or_default();
         let full_reason = format!(
-            "{} - RSI: {:.1}, Fast EMA: {:.2}, Slow EMA: {:.2}, High Volume: {}",
-            reason, rsi, fast_ema, slow_ema, high_volume
+            "{} - RSI: {:.1}, Fast EMA: {:.2}, Slow EMA: {:.2}, High Volume: {}{}{}",
+            reason, rsi, fast_ema, slow_ema, high_volume, obv_str, stoch_str
         );
 
         Some(
@@ -178,6 +237,10 @@ impl Strategy for MomentumStrategy {
         self.ema_slow.reset();
         self.volume_profile.reset();
         self.atr.reset();
+        self.obv.reset();
+        self.prev_obv = None;
+        self.stoch_rsi.reset();
+        self.last_stoch_k = None;
         self.candles_processed = 0;
     }
 }

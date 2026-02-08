@@ -28,6 +28,7 @@ pub struct BacktestConfig {
     pub risk_per_trade: Decimal,      // Risk % per trade (e.g., 0.05 for 5%, 0.12 for 12%)
     pub max_allocation: Decimal,      // Max % of capital per position (e.g., 0.60 for 60%, 0.90 for 90%)
     pub max_correlated_positions: usize, // Max positions in same correlation group
+    pub max_drawdown_pct: Decimal,           // Emergency stop drawdown threshold
     pub walk_forward_windows: Option<usize>, // None = standard backtest, Some(n) = n windows
     pub walk_forward_oos_pct: Decimal,       // Out-of-sample percentage (default 0.25)
 }
@@ -47,6 +48,7 @@ impl Default for BacktestConfig {
             risk_per_trade: dec!(0.05),  // Conservative 5% risk per trade
             max_allocation: dec!(0.60),  // Conservative 60% max allocation per position
             max_correlated_positions: 2, // Max 2 positions in same correlation group
+            max_drawdown_pct: dec!(15),  // Emergency stop at 15% drawdown
             walk_forward_windows: None,  // Standard backtest by default
             walk_forward_oos_pct: dec!(0.25), // 25% out-of-sample
         }
@@ -338,7 +340,7 @@ impl BacktestEngine {
 
         // 6. Update drawdown and check emergency stop
         self.portfolio.update_drawdown(&self.current_prices);
-        if self.portfolio.max_drawdown > dec!(15) {
+        if self.portfolio.max_drawdown > self.config.max_drawdown_pct {
             self.close_all_positions()?;
         }
 

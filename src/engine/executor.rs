@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::RuntimeConfig;
-use crate::notifications::{NotificationManager, position_opened, position_closed, stop_loss_triggered, take_profit_triggered, AlertType};
+use crate::notifications::{NotificationManager, position_opened, position_closed, stop_loss_triggered, take_profit_triggered};
 use crate::risk::RiskManager;
 use crate::strategies::{Strategy, StrategySignal};
 use crate::types::{CandleBuffer, OrderRequest, Side, Signal, TradingPair};
@@ -294,6 +294,35 @@ impl TradeExecutor {
                     let order = OrderRequest::market(position.pair, Side::Sell, position.quantity);
                     if let Ok(result) = self.engine.place_order(order).await {
                         closed.push(result.client_order_id);
+                    }
+                    continue;
+                }
+
+                // Check risk manager trailing stop and time limits
+                let pnl_pct = position.pnl_percentage();
+                let peak_pnl_pct = position.peak_pnl_pct;
+                let holding_hours = position.duration().num_hours();
+
+                if let Some(close_reason) = self.risk_manager.should_close_position(
+                    pnl_pct, peak_pnl_pct, holding_hours
+                ).await {
+                    info!(
+                        "{:?} triggered for {}: PnL {:.2}%, peak {:.2}%, held {}h",
+                        close_reason, position.pair, pnl_pct, peak_pnl_pct, holding_hours
+                    );
+
+                    self.notifications.notify(stop_loss_triggered(
+                        position.pair,
+                        current_price,
+                        position.unrealized_pnl,
+                    )).await;
+
+                    let order = OrderRequest::market(position.pair, Side::Sell, position.quantity);
+                    if let Ok(result) = self.engine.place_order(order).await {
+                        closed.push(result.client_order_id);
+                        if position.unrealized_pnl < Decimal::ZERO {
+                            self.risk_manager.record_loss(position.unrealized_pnl).await;
+                        }
                     }
                     continue;
                 }

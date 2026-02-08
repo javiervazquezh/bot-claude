@@ -1,5 +1,6 @@
 use rust_decimal::Decimal;
 use crate::indicators::{ATR, BollingerBands, RSI, Indicator};
+use crate::indicators::volume::MoneyFlowIndex;
 use crate::types::{CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
 
@@ -12,6 +13,7 @@ pub struct MeanReversionStrategy {
     bollinger: BollingerBands,
     rsi: RSI,
     atr: ATR,
+    mfi: MoneyFlowIndex,
     rsi_oversold: Decimal,
     rsi_overbought: Decimal,
     candles_processed: usize,
@@ -25,6 +27,7 @@ impl MeanReversionStrategy {
             bollinger: BollingerBands::default_params(),
             rsi: RSI::new(14),
             atr: ATR::new(14),
+            mfi: MoneyFlowIndex::new(14),
             rsi_oversold: Decimal::from(25),
             rsi_overbought: Decimal::from(75),
             candles_processed: 0,
@@ -38,6 +41,7 @@ impl MeanReversionStrategy {
             bollinger: BollingerBands::new(20, Decimal::new(25, 1)), // 2.5 std dev
             rsi: RSI::new(14),
             atr: ATR::new(14),
+            mfi: MoneyFlowIndex::new(14),
             rsi_oversold: Decimal::from(20),
             rsi_overbought: Decimal::from(80),
             candles_processed: 0,
@@ -128,6 +132,7 @@ impl Strategy for MeanReversionStrategy {
             self.bollinger.update(c.close);
             self.rsi.update(c.close);
             self.atr.update(c.high, c.low, c.close);
+            self.mfi.update(c.high, c.low, c.close, c.volume);
         }
         self.candles_processed = len;
 
@@ -143,8 +148,26 @@ impl Strategy for MeanReversionStrategy {
         let rsi = self.rsi.value()?;
         let atr = self.atr.value()?;
 
-        let (signal, confidence, reason) =
+        let (signal, mut confidence, reason) =
             self.check_reversal_conditions(price, bb_upper, bb_lower, bb_middle, rsi);
+
+        // MFI confirmation: MFI < 20 confirms oversold on buy, MFI > 80 confirms overbought on sell
+        if let Some(mfi_val) = self.mfi.value() {
+            match signal {
+                Signal::StrongBuy | Signal::Buy => {
+                    if mfi_val < Decimal::from(20) {
+                        confidence += Decimal::new(10, 2); // MFI confirms oversold
+                    }
+                }
+                Signal::StrongSell | Signal::Sell => {
+                    if mfi_val > Decimal::from(80) {
+                        confidence += Decimal::new(10, 2); // MFI confirms overbought
+                    }
+                }
+                _ => {}
+            }
+            confidence = confidence.min(Decimal::new(95, 2));
+        }
 
         // Calculate targets: entry at current, target at middle band
         let entry = price;
@@ -162,8 +185,13 @@ impl Strategy for MeanReversionStrategy {
             _ => (price, price),
         };
 
+        let mfi_str = self.mfi.value()
+            .map(|v| format!(", MFI: {:.1}", v))
+            .unwrap_or_default();
+        let full_reason = format!("{}{}", reason, mfi_str);
+
         Some(
-            StrategySignal::new(&self.name, self.pair, signal, confidence, &reason)
+            StrategySignal::new(&self.name, self.pair, signal, confidence, &full_reason)
                 .with_levels(entry, stop_loss, take_profit),
         )
     }
@@ -176,6 +204,7 @@ impl Strategy for MeanReversionStrategy {
         self.bollinger.reset();
         self.rsi.reset();
         self.atr.reset();
+        self.mfi.reset();
         self.candles_processed = 0;
     }
 }

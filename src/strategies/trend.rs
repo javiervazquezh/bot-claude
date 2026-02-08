@@ -1,5 +1,6 @@
 use rust_decimal::Decimal;
 use crate::indicators::{ATR, DoubleEMA, MACD, Indicator};
+use crate::indicators::volume::VWAP;
 use crate::types::{CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
 
@@ -12,6 +13,7 @@ pub struct TrendStrategy {
     ema: DoubleEMA,
     macd: MACD,
     atr: ATR,
+    vwap: VWAP,
     min_trend_strength: Decimal,
     atr_multiplier_sl: Decimal,
     atr_multiplier_tp: Decimal,
@@ -26,6 +28,7 @@ impl TrendStrategy {
             ema: DoubleEMA::new(9, 21),
             macd: MACD::default_params(),
             atr: ATR::new(14),
+            vwap: VWAP::new(),
             min_trend_strength: Decimal::new(5, 1), // 0.5% minimum spread
             atr_multiplier_sl: Decimal::new(15, 1), // 1.5x ATR for stop loss
             atr_multiplier_tp: Decimal::new(30, 1), // 3x ATR for take profit
@@ -45,6 +48,7 @@ impl TrendStrategy {
             ema: DoubleEMA::new(fast_ema, slow_ema),
             macd: MACD::default_params(),
             atr: ATR::new(atr_period),
+            vwap: VWAP::new(),
             min_trend_strength: Decimal::new(5, 1),
             atr_multiplier_sl: Decimal::new(15, 1),
             atr_multiplier_tp: Decimal::new(30, 1),
@@ -116,6 +120,7 @@ impl Strategy for TrendStrategy {
             self.ema.update(c.close);
             self.macd.update(c.close);
             self.atr.update(c.high, c.low, c.close);
+            self.vwap.update(c.high, c.low, c.close, c.volume);
         }
         self.candles_processed = len;
 
@@ -158,7 +163,17 @@ impl Strategy for TrendStrategy {
         }
 
         let signal = self.calculate_signal(is_bullish, macd_confirms);
-        let confidence = self.calculate_confidence(spread_pct, macd_confirms, trend_aligned);
+        let mut confidence = self.calculate_confidence(spread_pct, macd_confirms, trend_aligned);
+
+        // VWAP confirmation: price above VWAP confirms bullish, below confirms bearish
+        if let Some(vwap_val) = self.vwap.value() {
+            if is_bullish && current_price > vwap_val {
+                confidence += Decimal::new(10, 2);
+            } else if !is_bullish && current_price < vwap_val {
+                confidence += Decimal::new(10, 2);
+            }
+            confidence = confidence.min(Decimal::new(95, 2));
+        }
 
         // Calculate entry, stop loss, and take profit
         let entry = current_price;
@@ -172,9 +187,12 @@ impl Strategy for TrendStrategy {
             (sl, tp)
         };
 
+        let vwap_str = self.vwap.value()
+            .map(|v| format!(", VWAP: {:.2}", v))
+            .unwrap_or_default();
         let reason = format!(
-            "EMA crossover: fast={:.2} slow={:.2} spread={:.2}%, MACD: {:?}",
-            fast_ema, slow_ema, spread_pct, macd_trend
+            "EMA crossover: fast={:.2} slow={:.2} spread={:.2}%, MACD: {:?}{}",
+            fast_ema, slow_ema, spread_pct, macd_trend, vwap_str
         );
 
         Some(
@@ -191,6 +209,7 @@ impl Strategy for TrendStrategy {
         self.ema.reset();
         self.macd.reset();
         self.atr.reset();
+        self.vwap.reset();
         self.candles_processed = 0;
     }
 }

@@ -183,6 +183,30 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
     // Initialize engine (fetch initial data)
     engine.initialize().await?;
 
+    // Restore portfolio state from database if available
+    if let Ok(Some((usdt_balance, _initial_capital, total_pnl, peak_equity, max_drawdown))) =
+        db.load_portfolio_state().await
+    {
+        let mut portfolio = engine.get_portfolio_mut().await;
+        portfolio.set_balance("USDT", usdt_balance);
+        portfolio.total_pnl = total_pnl;
+        portfolio.peak_equity = peak_equity;
+        portfolio.max_drawdown = max_drawdown;
+        info!("Restored portfolio state: balance=${:.2}, PnL=${:.2}, drawdown={:.2}%",
+            usdt_balance, total_pnl, max_drawdown);
+    }
+
+    // Restore open positions from database
+    if let Ok(positions) = db.get_open_positions().await {
+        if !positions.is_empty() {
+            let mut portfolio = engine.get_portfolio_mut().await;
+            for position in positions {
+                info!("Restored position: {} {} @ ${:.2}", position.pair, position.quantity, position.entry_price);
+                portfolio.positions.insert(position.id.clone(), position);
+            }
+        }
+    }
+
     // Send bot started notification
     notifications.notify(notifications::AlertType::BotStarted).await;
 
@@ -342,10 +366,27 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
                                 // Update dashboard portfolio
                                 update_dashboard_portfolio(&dashboard, &engine).await;
 
-                                // Periodic console summary
+                                // Periodic console summary and state persistence
                                 if candle_count % 12 == 0 {
                                     let summary = engine.portfolio_summary().await;
                                     println!("\n{}", summary);
+
+                                    // Save portfolio state to database
+                                    let save_portfolio = engine.get_portfolio().await;
+                                    if let Err(e) = db.save_portfolio_state(
+                                        save_portfolio.available_usdt(),
+                                        save_portfolio.initial_capital,
+                                        save_portfolio.total_pnl,
+                                        save_portfolio.peak_equity,
+                                        save_portfolio.max_drawdown,
+                                    ).await {
+                                        warn!("Failed to save portfolio state: {}", e);
+                                    }
+                                    for pos in save_portfolio.get_open_positions() {
+                                        if let Err(e) = db.upsert_position(pos).await {
+                                            warn!("Failed to save position: {}", e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -380,6 +421,24 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
             }
         }
     }
+
+    // Save final state to database
+    let final_portfolio = engine.get_portfolio().await;
+    if let Err(e) = db.save_portfolio_state(
+        final_portfolio.available_usdt(),
+        final_portfolio.initial_capital,
+        final_portfolio.total_pnl,
+        final_portfolio.peak_equity,
+        final_portfolio.max_drawdown,
+    ).await {
+        warn!("Failed to save final portfolio state: {}", e);
+    }
+    for pos in final_portfolio.get_open_positions() {
+        if let Err(e) = db.upsert_position(pos).await {
+            warn!("Failed to save final position state: {}", e);
+        }
+    }
+    info!("Portfolio state saved to database");
 
     // Final summary
     let summary = engine.portfolio_summary().await;
@@ -566,6 +625,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
             risk_per_trade: dec!(0.05),
             max_allocation: dec!(0.60),
             max_correlated_positions: 2,
+            max_drawdown_pct: dec!(15),
             walk_forward_windows: None,
             walk_forward_oos_pct: dec!(0.25),
         };
@@ -645,6 +705,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         risk_per_trade: dec!(0.05),  // Conservative: 5% risk per trade
         max_allocation: dec!(0.60),  // Conservative: 60% max allocation per position
         max_correlated_positions: 2,
+        max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
@@ -676,6 +737,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         risk_per_trade: dec!(0.05),  // Conservative: 5% risk per trade
         max_allocation: dec!(0.60),  // Conservative: 60% max allocation per position
         max_correlated_positions: 2,
+        max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
@@ -707,6 +769,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         risk_per_trade: dec!(0.12),  // Ultra Aggressive: 12% risk per trade
         max_allocation: dec!(0.90),  // Ultra Aggressive: 90% max allocation per position
         max_correlated_positions: 3,
+        max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
@@ -738,6 +801,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         risk_per_trade: dec!(0.12),  // Ultra Aggressive: 12% risk per trade
         max_allocation: dec!(0.90),  // Ultra Aggressive: 90% max allocation per position
         max_correlated_positions: 3,
+        max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
@@ -817,6 +881,7 @@ async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize) -> 
         risk_per_trade: dec!(0.05),
         max_allocation: dec!(0.60),
         max_correlated_positions: 2,
+        max_drawdown_pct: dec!(15),
         walk_forward_windows: Some(n_windows),
         walk_forward_oos_pct: dec!(0.25),
     };

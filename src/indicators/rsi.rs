@@ -188,3 +188,19 @@ impl StochasticRSI {
         Some((k, d))
     }
 }
+
+impl Indicator for StochasticRSI {
+    fn name(&self) -> &'static str {
+        "StochasticRSI"
+    }
+
+    fn is_ready(&self) -> bool {
+        self.k_values.len() >= self.d_period
+    }
+
+    fn reset(&mut self) {
+        self.rsi.reset();
+        self.rsi_values.clear();
+        self.k_values.clear();
+    }
+}
