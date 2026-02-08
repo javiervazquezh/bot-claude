@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 use crate::indicators::Indicator;
 use crate::indicators::atr::{ATR, VolatilityLevel};
+use crate::indicators::ema::EMA;
 use crate::types::{Candle, CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
 use super::trend::{TrendStrategy, BreakoutStrategy};
@@ -29,6 +30,7 @@ pub struct CombinedStrategy {
     min_agreement: Decimal,
     layout: StrategyLayout,
     atr: ATR,
+    macro_ema: EMA,  // 200-period EMA for macro trend filter
     btc_correlation: Option<BTCCorrelationStrategy>,
     btc_correlation_weight: Decimal,
 }
@@ -56,6 +58,7 @@ impl CombinedStrategy {
             min_agreement: Decimal::new(60, 2),
             layout: StrategyLayout { trend_idx: Some(0), momentum_idx: None, mean_reversion_idx: Some(2) },
             atr: ATR::new(14),
+            macro_ema: EMA::new(200),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
         }
@@ -84,6 +87,7 @@ impl CombinedStrategy {
             min_agreement: Decimal::new(55, 2),
             layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
             atr: ATR::new(14),
+            macro_ema: EMA::new(200),
             btc_correlation: Some(BTCCorrelationStrategy::new()),
             btc_correlation_weight: Decimal::new(15, 2), // 15%
         }
@@ -110,9 +114,10 @@ impl CombinedStrategy {
             strategies,
             base_weights: weights.clone(),
             weights,
-            min_agreement: Decimal::new(50, 2),
+            min_agreement: Decimal::new(65, 2),
             layout: StrategyLayout { trend_idx: None, momentum_idx: Some(0), mean_reversion_idx: Some(2) },
             atr: ATR::new(14),
+            macro_ema: EMA::new(200),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
         }
@@ -139,6 +144,7 @@ impl CombinedStrategy {
             min_agreement: Decimal::new(55, 2),
             layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
             atr: ATR::new(14),
+            macro_ema: EMA::new(200),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
         }
@@ -198,10 +204,16 @@ impl CombinedStrategy {
             }
         }
 
-        // Ensure no weight goes negative
+        // Ensure no weight goes negative, then re-normalize to sum to 1.0
         for w in adjusted.iter_mut() {
             if *w < Decimal::ZERO {
                 *w = Decimal::ZERO;
+            }
+        }
+        let sum: Decimal = adjusted.iter().copied().sum();
+        if sum > Decimal::ZERO {
+            for w in adjusted.iter_mut() {
+                *w = *w / sum;
             }
         }
 
@@ -226,6 +238,18 @@ impl CombinedStrategy {
         for (i, signal) in signals.iter().enumerate() {
             let weight = self.weights.get(i).copied().unwrap_or(Decimal::ONE / Decimal::from(signals.len() as u32));
 
+            // FIX: Skip Neutral signals from aggregation to prevent dilution
+            // Neutral signals (strength=0) drag weighted average toward zero,
+            // making it nearly impossible to produce Buy/StrongBuy signals.
+            if matches!(signal.signal, Signal::Neutral) {
+                reasons.push(format!("{}: {:?} ({:.0}%)",
+                    signal.strategy_name, signal.signal, signal.confidence * Decimal::from(100)));
+                continue;
+            }
+
+            // Strength calculation: include confidence but only among active (non-Neutral) signals.
+            // With Neutral signals filtered out, total_weight reflects only active signals,
+            // so the avg_strength denominator is correct.
             let strength = Decimal::from(signal.signal.strength() as i32);
             weighted_strength += strength * weight * signal.confidence;
             total_weight += weight;
@@ -243,13 +267,15 @@ impl CombinedStrategy {
             }
         }
 
-        // Include BTC correlation signal if available
+        // Include BTC correlation signal if available (also skip if Neutral)
         if let Some(btc_sig) = btc_signal {
-            let weight = self.btc_correlation_weight;
-            let strength = Decimal::from(btc_sig.signal.strength() as i32);
-            weighted_strength += strength * weight * btc_sig.confidence;
-            total_weight += weight;
-            total_confidence += btc_sig.confidence * weight;
+            if !matches!(btc_sig.signal, Signal::Neutral) {
+                let weight = self.btc_correlation_weight;
+                let strength = Decimal::from(btc_sig.signal.strength() as i32);
+                weighted_strength += strength * weight * btc_sig.confidence;
+                total_weight += weight;
+                total_confidence += btc_sig.confidence * weight;
+            }
             reasons.push(format!("{}: {:?} ({:.0}%)",
                 btc_sig.strategy_name, btc_sig.signal, btc_sig.confidence * Decimal::from(100)));
         }
@@ -259,14 +285,29 @@ impl CombinedStrategy {
         }
 
         let avg_strength = weighted_strength / total_weight;
-        let avg_confidence = total_confidence / total_weight;
+        // FIX: Use max confidence from any sub-strategy instead of weighted average.
+        // The ensemble already selects entry/SL/TP from the highest-confidence sub-strategy,
+        // so the pass/fail decision should also use the best signal's confidence.
+        let avg_confidence = best_confidence;
+
+        // Require minimum agreement: at least 2 non-Neutral primary strategies must be active
+        // (or 1 for 2-strategy ensembles). BTC correlation is supplementary and doesn't count.
+        // This prevents single-strategy signals from trading alone.
+        let active_primary_count = signals.iter()
+            .filter(|s| !matches!(s.signal, Signal::Neutral))
+            .count();
+        let min_active = if signals.len() <= 2 { 1 } else { 2 };
 
         // Determine final signal based on weighted average
-        let final_signal = if avg_strength > Decimal::new(15, 1) {
+        // Thresholds adjusted for confidence-weighted strength with Neutral filtering:
+        // StrongBuy lowered from 1.5 to 1.2 since max achievable is ~1.3 with 2 strategies
+        let final_signal = if active_primary_count < min_active {
+            Signal::Neutral
+        } else if avg_strength > Decimal::new(12, 1) {
             Signal::StrongBuy
         } else if avg_strength > Decimal::new(5, 1) {
             Signal::Buy
-        } else if avg_strength < Decimal::new(-15, 1) {
+        } else if avg_strength < Decimal::new(-12, 1) {
             Signal::StrongSell
         } else if avg_strength < Decimal::new(-5, 1) {
             Signal::Sell
@@ -302,9 +343,10 @@ impl Strategy for CombinedStrategy {
     }
 
     fn analyze(&mut self, candles: &CandleBuffer) -> Option<StrategySignal> {
-        // Update regime detection from latest candle
+        // Update regime detection and macro trend from latest candle
         if let Some(latest) = candles.last() {
             self.update_regime(latest);
+            self.macro_ema.update(latest.close);
         }
 
         let mut signals = Vec::new();
@@ -319,7 +361,20 @@ impl Strategy for CombinedStrategy {
         let btc_signal = self.btc_correlation.as_mut()
             .and_then(|btc| btc.analyze(candles));
 
-        self.aggregate_signals(&signals, btc_signal.as_ref())
+        let mut result = self.aggregate_signals(&signals, btc_signal.as_ref())?;
+
+        // Macro trend filter: suppress long entries when price is below 200-EMA
+        // A long-only bot should not buy in confirmed downtrends
+        if let Some(macro_val) = self.macro_ema.value() {
+            if let Some(latest) = candles.last() {
+                if latest.close < macro_val && matches!(result.signal, Signal::Buy | Signal::StrongBuy) {
+                    result.signal = Signal::Neutral;
+                    result.reason = format!("FILTERED (below 200-EMA): {}", result.reason);
+                }
+            }
+        }
+
+        Some(result)
     }
 
     fn min_candles_required(&self) -> usize {
@@ -339,6 +394,7 @@ impl Strategy for CombinedStrategy {
         }
         self.weights = self.base_weights.clone();
         self.atr.reset();
+        self.macro_ema.reset();
     }
 
     fn update_btc_candle(&mut self, candle: Candle) {

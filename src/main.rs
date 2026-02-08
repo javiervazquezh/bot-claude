@@ -9,6 +9,7 @@ mod web;
 mod analytics;
 mod database;
 mod notifications;
+mod ml;
 
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
@@ -228,11 +229,11 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
 
     // Connect to WebSocket for real-time data
     let mut ws = BinanceWebSocket::new();
-    ws.subscribe_all_pairs(TimeFrame::M5);
+    ws.subscribe_all_pairs(TimeFrame::H4);
     let mut event_rx = ws.connect().await?;
 
     info!("Connected to market data feed");
-    info!("Monitoring BTC, ETH, SOL on 5-minute timeframe");
+    info!("Monitoring BTC, ETH, SOL on 4-hour timeframe");
     info!("Press Ctrl+C to stop");
 
     // Update initial portfolio state
@@ -244,7 +245,7 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
 
     // Log startup
     dashboard.add_log("INFO".to_string(), "Bot initialized with historical candles - ready to trade!".to_string()).await;
-    dashboard.add_log("INFO".to_string(), format!("Monitoring {} pairs on 5-minute timeframe", strategies.len())).await;
+    dashboard.add_log("INFO".to_string(), format!("Monitoring {} pairs on 4-hour timeframe", strategies.len())).await;
 
     // Main trading loop
     let mut candle_count = 0u64;
@@ -726,10 +727,10 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         ],
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.70),   // High bar: only strong signals
-        min_risk_reward: dec!(2.5),   // Require excellent R:R
+        min_confidence: dec!(0.68),   // High bar: only strong signals
+        min_risk_reward: dec!(2.0),   // Require solid R:R
         risk_per_trade: dec!(0.03),   // 3% risk per trade
-        max_allocation: dec!(0.40),   // 40% max allocation per position
+        max_allocation: dec!(0.35),   // 35% max allocation per position
         max_correlated_positions: 2,
         max_drawdown_pct: dec!(10),   // Tight emergency stop
         walk_forward_windows: None,

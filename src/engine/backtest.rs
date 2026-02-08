@@ -7,7 +7,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::exchange::BinanceClient;
+use crate::ml::{TradeFeatures, TradePredictor, OutcomeTracker};
+use crate::ml::features::{self, RecentTrade};
 use crate::strategies::{Strategy, StrategySignal, create_improved_strategy, create_strategies_for_pair};
+use crate::strategies::combined::CombinedStrategy;
 use crate::types::{Candle, CandleBuffer, Position, PositionStatus, Side, Signal, TimeFrame, TradingPair};
 
 use super::results::{BacktestResults, EquityPoint, ExitReason, MetricsCalculator, TradeRecord, WalkForwardResult, WindowResult};
@@ -71,6 +74,26 @@ pub struct BacktestEngine {
     first_prices: HashMap<TradingPair, Decimal>,
     atr_indicators: HashMap<TradingPair, crate::indicators::atr::ATR>,
     emergency_stopped: bool,
+    /// Cooldown: candle number of last exit per pair (to prevent churn after stop-loss)
+    last_exit_candle: HashMap<TradingPair, u64>,
+    /// Whether the last exit for a pair was a stop-loss (cooldown only applies after losses)
+    last_exit_was_stoploss: HashMap<TradingPair, bool>,
+    /// ML trade predictor for signal quality filtering
+    trade_predictor: TradePredictor,
+    /// ML outcome tracker for collecting training data
+    outcome_tracker: OutcomeTracker,
+    /// Number of trades since last ML retrain
+    trades_since_retrain: usize,
+    /// ML retrain interval (every N completed trades)
+    retrain_interval: usize,
+    /// Maps pair → ML trade_id for matching entry features to exit outcomes
+    ml_trade_ids: HashMap<TradingPair, String>,
+    /// Volatility targeting: rolling daily returns for realized vol calculation
+    daily_returns_window: Vec<f64>,
+    /// Previous day's ending equity (for computing daily returns)
+    prev_day_equity: Option<Decimal>,
+    /// Current volatility scaling factor (adjusts position sizes to target constant vol)
+    vol_scale: Decimal,
 }
 
 impl BacktestEngine {
@@ -117,6 +140,16 @@ impl BacktestEngine {
             first_prices: HashMap::new(),
             atr_indicators,
             emergency_stopped: false,
+            last_exit_candle: HashMap::new(),
+            last_exit_was_stoploss: HashMap::new(),
+            trade_predictor: TradePredictor::new(),
+            outcome_tracker: OutcomeTracker::new(),
+            trades_since_retrain: 0,
+            retrain_interval: 20,
+            ml_trade_ids: HashMap::new(),
+            daily_returns_window: Vec::new(),
+            prev_day_equity: None,
+            vol_scale: Decimal::ONE,
         }
     }
 
@@ -348,7 +381,36 @@ impl BacktestEngine {
         let equity = self.portfolio.total_equity(&self.current_prices);
         let drawdown = self.portfolio.max_drawdown;
         if self.last_equity_date.map_or(true, |d| d != candle_date) {
-            // New day: push a new equity point
+            // New day: compute daily return for volatility targeting
+            if let Some(prev_equity) = self.prev_day_equity {
+                if prev_equity > Decimal::ZERO {
+                    let daily_ret: f64 = ((equity - prev_equity) / prev_equity)
+                        .try_into().unwrap_or(0.0);
+                    self.daily_returns_window.push(daily_ret);
+                    // Rolling 20-day window
+                    if self.daily_returns_window.len() > 20 {
+                        self.daily_returns_window.remove(0);
+                    }
+                    // Recompute vol scale when we have enough data
+                    if self.daily_returns_window.len() >= 10 {
+                        let n = self.daily_returns_window.len() as f64;
+                        let mean: f64 = self.daily_returns_window.iter().sum::<f64>() / n;
+                        let variance: f64 = self.daily_returns_window.iter()
+                            .map(|r| (r - mean).powi(2))
+                            .sum::<f64>() / (n - 1.0);
+                        let daily_vol = variance.sqrt();
+                        let annualized_vol = daily_vol * 365.0f64.sqrt();
+                        // Target 18% annualized portfolio volatility
+                        if annualized_vol > 0.01 {
+                            let scale = (0.18 / annualized_vol).clamp(0.4, 1.8);
+                            self.vol_scale = Decimal::try_from(scale).unwrap_or(Decimal::ONE);
+                        }
+                    }
+                }
+            }
+            self.prev_day_equity = Some(equity);
+
+            // Push new equity point
             self.equity_curve.push(EquityPoint {
                 timestamp: candle.open_time,
                 equity,
@@ -435,9 +497,44 @@ impl BacktestEngine {
             }
         }
 
+        // Check cooldown: skip re-entry within 6 candles after a stop-loss exit
+        if side == Some(Side::Buy) && !has_position {
+            if let Some(&exit_candle) = self.last_exit_candle.get(&signal.pair) {
+                let is_stoploss = self.last_exit_was_stoploss.get(&signal.pair).copied().unwrap_or(false);
+                if is_stoploss && self.candles_processed < exit_candle + 6 {
+                    debug!("Signal rejected: cooldown after stop-loss ({} candles remaining)",
+                        exit_candle + 6 - self.candles_processed);
+                    return Ok(());
+                }
+            }
+        }
+
+        // ML signal gating: extract features and check predictor
+        if side == Some(Side::Buy) && !has_position {
+            if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
+                let recent = self.outcome_tracker.recent_trades(10);
+                let feats = features::extract_features(&signal, buffer, &recent, None);
+                if let Some(ref f) = feats {
+                    if !self.trade_predictor.should_trade(f) {
+                        debug!("ML model rejected signal for {}", signal.pair);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         match (side, has_position) {
             (Some(Side::Buy), false) => {
                 debug!("Opening position for {}", signal.pair);
+                // Record ML features for this trade
+                if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
+                    let recent = self.outcome_tracker.recent_trades(10);
+                    if let Some(feats) = features::extract_features(&signal, buffer, &recent, None) {
+                        let trade_id = format!("{}_{}", signal.pair, self.candles_processed);
+                        self.outcome_tracker.record_entry(&trade_id, feats);
+                        self.ml_trade_ids.insert(signal.pair, trade_id);
+                    }
+                }
                 // Open new long position
                 self.open_position(&signal, price, timestamp)?;
             }
@@ -496,6 +593,18 @@ impl BacktestEngine {
                 quantity = quantity * factor;
                 debug!("[{}] ATR sizing: {:?} -> {:.1}x", signal.pair, vol_level, factor);
             }
+        }
+
+        // Volatility targeting: scale positions to target constant portfolio vol
+        quantity = quantity * self.vol_scale;
+
+        // Drawdown-based position scaling: reduce exposure during drawdowns
+        let current_dd = self.portfolio.max_drawdown;
+        if current_dd > dec!(5) {
+            // Linear scale-down from 5% DD (1.0x) to 15% DD (0.3x)
+            let dd_scale = (Decimal::ONE - (current_dd - dec!(5)) / dec!(10)).max(dec!(0.3));
+            quantity = quantity * dd_scale;
+            debug!("Drawdown scaling: {:.1}% DD -> {:.2}x size", current_dd, dd_scale);
         }
 
         // Calculate fee
@@ -574,6 +683,14 @@ impl BacktestEngine {
             None => return Ok(()),
         };
 
+        // Update peak PnL% using candle.high (best price during this candle for longs)
+        let best_pnl_pct = (candle.high - position.entry_price) / position.entry_price * dec!(100);
+        if best_pnl_pct > position.peak_pnl_pct {
+            if let Some(pos) = self.portfolio.get_position_for_pair_mut(pair) {
+                pos.peak_pnl_pct = best_pnl_pct;
+            }
+        }
+
         // Check stop loss against candle LOW (worst case for longs)
         if let Some(sl) = position.stop_loss {
             if candle.low <= sl {
@@ -589,6 +706,24 @@ impl BacktestEngine {
                 debug!("[{}] Take profit triggered: high={:.2} >= tp={:.2}", pair, candle.high, tp);
                 // Execute at take profit price, not at the high
                 return self.close_position_internal(&position, tp, candle.open_time, ExitReason::TakeProfit);
+            }
+        }
+
+        // Trailing stop: if position reached 12%+ profit, trail at 5% from peak
+        // Wide thresholds for H4 candles where 3-5% retracements are normal
+        let current_peak = if best_pnl_pct > position.peak_pnl_pct {
+            best_pnl_pct
+        } else {
+            position.peak_pnl_pct
+        };
+        if current_peak >= dec!(12) {
+            let current_pnl_pct = (candle.low - position.entry_price) / position.entry_price * dec!(100);
+            let drawdown_from_peak = current_peak - current_pnl_pct;
+            if drawdown_from_peak >= dec!(5) {
+                let trail_price = position.entry_price * (Decimal::ONE + (current_peak - dec!(5)) / dec!(100));
+                debug!("[{}] Trailing stop triggered: peak={:.2}%, current low PnL={:.2}%, trail price={:.2}",
+                    pair, current_peak, current_pnl_pct, trail_price);
+                return self.close_position_internal(&position, trail_price, candle.open_time, ExitReason::TrailingStop);
             }
         }
 
@@ -616,6 +751,10 @@ impl BacktestEngine {
         let net_pnl = gross_pnl - total_fees;
         let pnl_pct = (execution_price - position.entry_price) / position.entry_price * dec!(100);
 
+        // Record cooldown data for this pair (before exit_reason is moved)
+        self.last_exit_candle.insert(position.pair, self.candles_processed);
+        self.last_exit_was_stoploss.insert(position.pair, matches!(exit_reason, ExitReason::StopLoss));
+
         // Create trade record
         let trade = TradeRecord {
             id: position.id.clone(),
@@ -640,6 +779,27 @@ impl BacktestEngine {
 
         // Deduct fee from balance
         self.portfolio.update_balance("USDT", -fee);
+
+        // ML: record outcome and retrain if interval reached
+        if let Some(trade_id) = self.ml_trade_ids.remove(&position.pair) {
+            self.outcome_tracker.record_exit(&trade_id, pnl_pct);
+            self.trades_since_retrain += 1;
+
+            if self.trades_since_retrain >= self.retrain_interval {
+                let training_data = self.outcome_tracker.get_training_data();
+                match self.trade_predictor.train(&training_data) {
+                    Ok(report) => {
+                        info!("ML model retrained: {} samples, {:.1}% accuracy ({} wins / {} losses)",
+                            report.samples, report.accuracy * 100.0,
+                            report.wins_in_data, report.losses_in_data);
+                    }
+                    Err(e) => {
+                        debug!("ML retrain skipped: {}", e);
+                    }
+                }
+                self.trades_since_retrain = 0;
+            }
+        }
 
         debug!(
             "[{}] Closed position: ${:.2} P&L ({:.2}%)",

@@ -221,9 +221,9 @@ impl RiskManager {
             return Some(CloseReason::TimeLimit);
         }
 
-        // Trailing stop: once peak PnL exceeded 5%, trail by 2% from peak
-        if peak_pnl_pct > Decimal::from(5) {
-            let trailing_stop_level = peak_pnl_pct - Decimal::from(2);
+        // Trailing stop: once peak PnL exceeded 12%, trail by 5% from peak
+        if peak_pnl_pct > Decimal::from(12) {
+            let trailing_stop_level = peak_pnl_pct - Decimal::from(5);
             if pnl_pct < trailing_stop_level {
                 return Some(CloseReason::TrailingStop);
             }

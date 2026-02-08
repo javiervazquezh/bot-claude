@@ -71,6 +71,11 @@ tower-http = { version = "0.5", features = ["fs", "cors"] }
 # HTML templating
 askama = "0.12"
 
+# ML for signal quality prediction
+linfa = "0.7"
+linfa-logistic = "0.7"
+ndarray = "0.16"
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"

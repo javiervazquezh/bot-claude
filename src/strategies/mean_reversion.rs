@@ -169,17 +169,19 @@ impl Strategy for MeanReversionStrategy {
             confidence = confidence.min(Decimal::new(95, 2));
         }
 
-        // Calculate targets: entry at current, target at middle band
+        // Calculate targets: entry at current, target past middle band for better R:R
         let entry = price;
         let (stop_loss, take_profit) = match signal {
             Signal::StrongBuy | Signal::Buy => {
                 let sl = bb_lower - (atr * Decimal::new(5, 1));
-                let tp = bb_middle;
+                // Target midpoint between middle and upper band for better R:R
+                let tp = bb_middle + (bb_upper - bb_middle) * Decimal::new(5, 1);
                 (sl, tp)
             }
             Signal::StrongSell | Signal::Sell => {
                 let sl = bb_upper + (atr * Decimal::new(5, 1));
-                let tp = bb_middle;
+                // Target midpoint between middle and lower band for better R:R
+                let tp = bb_middle - (bb_middle - bb_lower) * Decimal::new(5, 1);
                 (sl, tp)
             }
             _ => (price, price),
