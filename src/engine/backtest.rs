@@ -55,15 +55,6 @@ impl Default for BacktestConfig {
     }
 }
 
-/// Returns the correlation group for a trading pair
-fn correlation_group(pair: TradingPair) -> &'static str {
-    match pair {
-        TradingPair::BTCUSDT => "btc",
-        TradingPair::ETHUSDT | TradingPair::SOLUSDT => "alt_major",
-        _ => "alt_minor",
-    }
-}
-
 /// Core backtesting engine
 pub struct BacktestEngine {
     config: BacktestConfig,
@@ -79,6 +70,7 @@ pub struct BacktestEngine {
     last_equity_date: Option<NaiveDate>,
     first_prices: HashMap<TradingPair, Decimal>,
     atr_indicators: HashMap<TradingPair, crate::indicators::atr::ATR>,
+    emergency_stopped: bool,
 }
 
 impl BacktestEngine {
@@ -124,6 +116,7 @@ impl BacktestEngine {
             last_equity_date: None,
             first_prices: HashMap::new(),
             atr_indicators,
+            emergency_stopped: false,
         }
     }
 
@@ -335,27 +328,40 @@ impl BacktestEngine {
         self.portfolio.update_position_price(pair, price);
         self.check_stops(pair, &candle)?;
 
-        // 5. Run strategy analysis
-        self.run_strategy(pair, price, candle.open_time)?;
+        // 5. Run strategy analysis (skip if emergency stopped)
+        if !self.emergency_stopped {
+            self.run_strategy(pair, price, candle.open_time)?;
+        }
 
         // 6. Update drawdown and check emergency stop
         self.portfolio.update_drawdown(&self.current_prices);
-        if self.portfolio.max_drawdown > self.config.max_drawdown_pct {
+        if !self.emergency_stopped && self.portfolio.max_drawdown > self.config.max_drawdown_pct {
+            warn!("Emergency stop triggered at {:.2}% drawdown (limit: {:.2}%)",
+                self.portfolio.max_drawdown, self.config.max_drawdown_pct);
             self.close_all_positions()?;
+            self.emergency_stopped = true;
         }
 
-        // 7. Record equity point once per calendar day (for proper daily Sharpe calculation)
+        // 7. Record/update equity point for current calendar day (end-of-day value for proper Sharpe)
         self.candles_processed += 1;
         let candle_date = candle.open_time.date_naive();
+        let equity = self.portfolio.total_equity(&self.current_prices);
+        let drawdown = self.portfolio.max_drawdown;
         if self.last_equity_date.map_or(true, |d| d != candle_date) {
-            let equity = self.portfolio.total_equity(&self.current_prices);
-            let drawdown = self.portfolio.max_drawdown;
+            // New day: push a new equity point
             self.equity_curve.push(EquityPoint {
                 timestamp: candle.open_time,
                 equity,
                 drawdown_pct: drawdown,
             });
             self.last_equity_date = Some(candle_date);
+        } else {
+            // Same day: overwrite with latest (end-of-day) values
+            if let Some(last) = self.equity_curve.last_mut() {
+                last.timestamp = candle.open_time;
+                last.equity = equity;
+                last.drawdown_pct = drawdown;
+            }
         }
 
         Ok(())
@@ -418,9 +424,9 @@ impl BacktestEngine {
 
         // Check correlation limits before opening
         if side == Some(Side::Buy) && !has_position {
-            let group = correlation_group(signal.pair);
+            let group = signal.pair.correlation_group();
             let correlated_count = self.portfolio.get_open_positions().iter()
-                .filter(|p| correlation_group(p.pair) == group)
+                .filter(|p| p.pair.correlation_group() == group)
                 .count();
             if correlated_count >= self.config.max_correlated_positions {
                 debug!("Signal rejected: {} correlated positions in group '{}' >= max {}",
@@ -530,6 +536,7 @@ impl BacktestEngine {
             strategy_id: signal.strategy_name.clone(),
             order_ids: Vec::new(),
             oco_order_id: None,
+            entry_fee: fee,
         };
 
         debug!(
@@ -603,9 +610,10 @@ impl BacktestEngine {
         let fee = notional * self.config.fee_rate;
         self.total_fees += fee;
 
-        // Calculate P&L
+        // Calculate P&L (including both entry and exit fees)
         let gross_pnl = (execution_price - position.entry_price) * position.quantity;
-        let net_pnl = gross_pnl - fee;
+        let total_fees = position.entry_fee + fee;
+        let net_pnl = gross_pnl - total_fees;
         let pnl_pct = (execution_price - position.entry_price) / position.entry_price * dec!(100);
 
         // Create trade record
@@ -620,7 +628,7 @@ impl BacktestEngine {
             quantity: position.quantity,
             pnl: net_pnl,
             pnl_pct,
-            fees: fee,
+            fees: total_fees,
             strategy: position.strategy_id.clone(),
             exit_reason,
         };

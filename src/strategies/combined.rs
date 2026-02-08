@@ -68,13 +68,12 @@ impl CombinedStrategy {
             Box::new(MomentumStrategy::new(pair)),
             Box::new(MeanReversionStrategy::new(pair)),
         ];
-        // Weights adjusted to leave room for BTC correlation (15%)
+        // Weights sum to 100%; BTC correlation is extra signal that normalizes via total_weight
         let weights = vec![
-            Decimal::new(35, 2), // 35% trend
-            Decimal::new(30, 2), // 30% momentum
-            Decimal::new(20, 2), // 20% mean reversion
+            Decimal::new(40, 2), // 40% trend
+            Decimal::new(35, 2), // 35% momentum
+            Decimal::new(25, 2), // 25% mean reversion
         ];
-        // Remaining 15% goes to BTC correlation strategy
 
         Self {
             name: "Combined_ETH".to_string(),
@@ -357,6 +356,7 @@ pub struct BTCCorrelationStrategy {
     btc_candles: CandleBuffer,
     correlation_lookback: usize,
     lag_periods: usize,
+    atr: crate::indicators::ATR,
 }
 
 impl BTCCorrelationStrategy {
@@ -367,6 +367,7 @@ impl BTCCorrelationStrategy {
             btc_candles: CandleBuffer::new(100),
             correlation_lookback: 20,
             lag_periods: 2,
+            atr: crate::indicators::ATR::new(14),
         }
     }
 
@@ -418,7 +419,10 @@ impl Strategy for BTCCorrelationStrategy {
             ));
         }
 
-        let _current = candles.last()?;
+        let current = candles.last()?;
+
+        // Update ATR from ETH candles
+        self.atr.update(current.high, current.low, current.close);
 
         let (signal, confidence, reason) = if btc_change > Decimal::from(2) {
             (
@@ -446,7 +450,24 @@ impl Strategy for BTCCorrelationStrategy {
             )
         };
 
-        Some(StrategySignal::new(&self.name, self.pair, signal, confidence, &reason))
+        let mut result = StrategySignal::new(&self.name, self.pair, signal, confidence, &reason);
+
+        // Set price levels from ETH ATR
+        if let Some(atr) = self.atr.value() {
+            let entry = current.close;
+            let (sl, tp) = match signal {
+                Signal::StrongBuy | Signal::Buy => {
+                    (entry - atr * Decimal::new(15, 1), entry + atr * Decimal::from(3))
+                }
+                Signal::StrongSell | Signal::Sell => {
+                    (entry + atr * Decimal::new(15, 1), entry - atr * Decimal::from(3))
+                }
+                _ => (entry, entry),
+            };
+            result = result.with_levels(entry, sl, tp);
+        }
+
+        Some(result)
     }
 
     fn min_candles_required(&self) -> usize {
@@ -455,6 +476,7 @@ impl Strategy for BTCCorrelationStrategy {
 
     fn reset(&mut self) {
         self.btc_candles = CandleBuffer::new(100);
+        self.atr.reset();
     }
 }
 

@@ -265,8 +265,10 @@ impl MoneyFlowIndex {
                 let pos_sum: Decimal = self.positive_flows.iter().sum();
                 let neg_sum: Decimal = self.negative_flows.iter().sum();
 
-                if neg_sum.is_zero() {
-                    self.value = Some(Decimal::from(100));
+                if pos_sum.is_zero() && neg_sum.is_zero() {
+                    self.value = Some(Decimal::from(50)); // No flow in either direction = neutral
+                } else if neg_sum.is_zero() {
+                    self.value = Some(Decimal::from(100)); // All positive flow
                 } else {
                     let money_ratio = pos_sum / neg_sum;
                     self.value = Some(Decimal::from(100) - (Decimal::from(100) / (Decimal::ONE + money_ratio)));

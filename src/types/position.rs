@@ -34,6 +34,8 @@ pub struct Position {
     pub order_ids: Vec<String>,
     #[serde(default)]
     pub oco_order_id: Option<String>,
+    #[serde(default)]
+    pub entry_fee: Decimal,
 }
 
 impl Position {
@@ -62,6 +64,7 @@ impl Position {
             strategy_id,
             order_ids: Vec::new(),
             oco_order_id: None,
+            entry_fee: Decimal::ZERO,
         }
     }
 

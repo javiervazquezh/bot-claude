@@ -248,7 +248,6 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
 
     // Main trading loop
     let mut candle_count = 0u64;
-    let mut last_analysis = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -264,10 +263,8 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
                             candle_count += 1;
                             engine.update_candle(candle.clone()).await;
 
-                            // Run analysis every minute
-                            if last_analysis.elapsed().as_secs() >= 60 {
-                                last_analysis = std::time::Instant::now();
-
+                            // Run analysis on every closed candle (not gated by timer)
+                            {
                                 // Only process signals if controller allows
                                 if controller.should_process_signals() {
                                     for strategy in &mut strategies {
@@ -359,6 +356,35 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
                                     if let Ok(closed) = executor.check_stop_losses().await {
                                         for id in closed {
                                             info!("Position closed by stop/take profit: {}", id);
+                                        }
+                                    }
+
+                                    // Update drawdown tracking (C2)
+                                    {
+                                        let prices = engine.prices_arc();
+                                        let prices_map = prices.read().await;
+                                        let mut portfolio = engine.get_portfolio_mut().await;
+                                        portfolio.update_drawdown(&prices_map);
+                                    }
+
+                                    // Check emergency stop (C3)
+                                    {
+                                        let portfolio = engine.get_portfolio().await;
+                                        if risk_manager.check_emergency_stop(&portfolio).await {
+                                            warn!("EMERGENCY STOP triggered! Closing all positions.");
+                                            dashboard.add_log("CRITICAL".to_string(), "Emergency stop triggered - closing all positions".to_string()).await;
+                                            // Force-close all open positions
+                                            for pos in portfolio.get_open_positions() {
+                                                if let Some(_price) = engine.get_price(pos.pair).await {
+                                                    let request = crate::types::OrderRequest::market(
+                                                        pos.pair, Side::Sell, pos.quantity,
+                                                    );
+                                                    if let Err(e) = engine.place_order(request).await {
+                                                        error!("Failed to emergency close {}: {}", pos.pair, e);
+                                                    }
+                                                }
+                                            }
+                                            let _ = controller.stop().await;
                                         }
                                     }
                                 }
@@ -675,20 +701,20 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Standard backtest comparison (4 scenarios)
+    // Standard backtest comparison (3 scenarios with different risk profiles)
     info!("=== Starting Comprehensive Backtest Comparison ===");
     info!("Period: {} to {}", start_date, end_date);
     info!("Pairs: BTC, ETH, SOL");
     info!("Timeframe: 4-hour");
     info!("Initial Capital: $2,000");
-    info!("Running 4 scenarios: Conservative (w/ & w/o PM), Aggressive (w/ & w/o PM)");
+    info!("Running 3 scenarios: Conservative, Moderate, Aggressive");
     println!();
 
-    // Scenario 1: Conservative WITHOUT position management
+    // Scenario 1: Conservative (high confidence, low risk, low allocation)
     info!("\n{}", "=".repeat(80));
-    info!("SCENARIO 1: Conservative 5-Year Profile WITHOUT Position Management");
+    info!("SCENARIO 1: Conservative");
     info!("{}", "=".repeat(80));
-    let conservative_no_pm = BacktestConfig {
+    let conservative = BacktestConfig {
         start_date,
         end_date,
         initial_capital: Decimal::from(2000),
@@ -700,27 +726,27 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         ],
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.65),  // Conservative 5-Year: 0.65 (2623% over 5 years)
-        min_risk_reward: dec!(2.0),  // Conservative 5-Year: 2.0 R:R
-        risk_per_trade: dec!(0.05),  // Conservative: 5% risk per trade
-        max_allocation: dec!(0.60),  // Conservative: 60% max allocation per position
+        min_confidence: dec!(0.70),   // High bar: only strong signals
+        min_risk_reward: dec!(2.5),   // Require excellent R:R
+        risk_per_trade: dec!(0.03),   // 3% risk per trade
+        max_allocation: dec!(0.40),   // 40% max allocation per position
         max_correlated_positions: 2,
-        max_drawdown_pct: dec!(15),
+        max_drawdown_pct: dec!(10),   // Tight emergency stop
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
-    let mut engine1 = BacktestEngine::new(conservative_no_pm);
+    let mut engine1 = BacktestEngine::new(conservative);
     let results1 = engine1.run().await?;
     results1.print_summary();
     let json1 = serde_json::to_string_pretty(&results1)?;
-    std::fs::write("backtest_conservative_no_pm.json", &json1)?;
-    info!("Results saved to backtest_conservative_no_pm.json");
+    std::fs::write("backtest_conservative.json", &json1)?;
+    info!("Results saved to backtest_conservative.json");
 
-    // Scenario 2: Conservative WITH position management
+    // Scenario 2: Moderate (balanced confidence, moderate risk)
     info!("\n{}", "=".repeat(80));
-    info!("SCENARIO 2: Conservative 5-Year Profile WITH Position Management");
+    info!("SCENARIO 2: Moderate");
     info!("{}", "=".repeat(80));
-    let conservative_with_pm = BacktestConfig {
+    let moderate = BacktestConfig {
         start_date,
         end_date,
         initial_capital: Decimal::from(2000),
@@ -732,27 +758,27 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         ],
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.65),  // Conservative 5-Year: 0.65
-        min_risk_reward: dec!(2.0),  // Conservative 5-Year: 2.0 R:R
-        risk_per_trade: dec!(0.05),  // Conservative: 5% risk per trade
-        max_allocation: dec!(0.60),  // Conservative: 60% max allocation per position
+        min_confidence: dec!(0.65),   // Moderate confidence bar
+        min_risk_reward: dec!(2.0),   // Standard R:R
+        risk_per_trade: dec!(0.05),   // 5% risk per trade
+        max_allocation: dec!(0.60),   // 60% max allocation per position
         max_correlated_positions: 2,
         max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
-    let mut engine2 = BacktestEngine::new(conservative_with_pm);
+    let mut engine2 = BacktestEngine::new(moderate);
     let results2 = engine2.run().await?;
     results2.print_summary();
     let json2 = serde_json::to_string_pretty(&results2)?;
-    std::fs::write("backtest_conservative_with_pm.json", &json2)?;
-    info!("Results saved to backtest_conservative_with_pm.json");
+    std::fs::write("backtest_moderate.json", &json2)?;
+    info!("Results saved to backtest_moderate.json");
 
-    // Scenario 3: Ultra Aggressive WITHOUT position management
+    // Scenario 3: Aggressive (lower confidence bar, high risk, high allocation)
     info!("\n{}", "=".repeat(80));
-    info!("SCENARIO 3: Ultra Aggressive Profile WITHOUT Position Management");
+    info!("SCENARIO 3: Aggressive");
     info!("{}", "=".repeat(80));
-    let aggressive_no_pm = BacktestConfig {
+    let aggressive = BacktestConfig {
         start_date,
         end_date,
         initial_capital: Decimal::from(2000),
@@ -764,81 +790,35 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         ],
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.65),  // Ultra Aggressive: 0.65 (3965% over 5 years)
-        min_risk_reward: dec!(2.0),  // Ultra Aggressive: 2.0 R:R
-        risk_per_trade: dec!(0.12),  // Ultra Aggressive: 12% risk per trade
-        max_allocation: dec!(0.90),  // Ultra Aggressive: 90% max allocation per position
+        min_confidence: dec!(0.55),   // Lower bar: more trades
+        min_risk_reward: dec!(1.5),   // Accept lower R:R
+        risk_per_trade: dec!(0.12),   // 12% risk per trade
+        max_allocation: dec!(0.90),   // 90% max allocation per position
         max_correlated_positions: 3,
-        max_drawdown_pct: dec!(15),
+        max_drawdown_pct: dec!(20),   // Wider emergency stop
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
     };
-    let mut engine3 = BacktestEngine::new(aggressive_no_pm);
+    let mut engine3 = BacktestEngine::new(aggressive);
     let results3 = engine3.run().await?;
     results3.print_summary();
     let json3 = serde_json::to_string_pretty(&results3)?;
-    std::fs::write("backtest_aggressive_no_pm.json", &json3)?;
-    info!("Results saved to backtest_aggressive_no_pm.json");
-
-    // Scenario 4: Ultra Aggressive WITH position management
-    info!("\n{}", "=".repeat(80));
-    info!("SCENARIO 4: Ultra Aggressive Profile WITH Position Management");
-    info!("{}", "=".repeat(80));
-    let aggressive_with_pm = BacktestConfig {
-        start_date,
-        end_date,
-        initial_capital: Decimal::from(2000),
-        timeframe: TimeFrame::H4,
-        pairs: vec![
-            TradingPair::BTCUSDT,
-            TradingPair::ETHUSDT,
-            TradingPair::SOLUSDT,
-        ],
-        fee_rate: dec!(0.001),
-        slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.65),  // Ultra Aggressive: 0.65
-        min_risk_reward: dec!(2.0),  // Ultra Aggressive: 2.0 R:R
-        risk_per_trade: dec!(0.12),  // Ultra Aggressive: 12% risk per trade
-        max_allocation: dec!(0.90),  // Ultra Aggressive: 90% max allocation per position
-        max_correlated_positions: 3,
-        max_drawdown_pct: dec!(15),
-        walk_forward_windows: None,
-        walk_forward_oos_pct: dec!(0.25),
-    };
-    let mut engine4 = BacktestEngine::new(aggressive_with_pm);
-    let results4 = engine4.run().await?;
-    results4.print_summary();
-    let json4 = serde_json::to_string_pretty(&results4)?;
-    std::fs::write("backtest_aggressive_with_pm.json", &json4)?;
-    info!("Results saved to backtest_aggressive_with_pm.json");
+    std::fs::write("backtest_aggressive.json", &json3)?;
+    info!("Results saved to backtest_aggressive.json");
 
     // Print comparison summary
     info!("\n\n{}", "=".repeat(80));
     info!("COMPARISON SUMMARY");
     info!("{}", "=".repeat(80));
-    println!("\n{:<45} {:>12} {:>12} {:>10} {:>10} {:>10}", "Scenario", "Final Equity", "Return %", "Max DD %", "Sharpe", "Alpha %");
-    println!("{}", "-".repeat(103));
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
-        "Conservative 5-Year WITHOUT PM", results1.final_equity, results1.total_return_pct, results1.max_drawdown_pct, results1.sharpe_ratio, results1.alpha_pct);
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
-        "Conservative 5-Year WITH PM", results2.final_equity, results2.total_return_pct, results2.max_drawdown_pct, results2.sharpe_ratio, results2.alpha_pct);
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
-        "Ultra Aggressive WITHOUT PM", results3.final_equity, results3.total_return_pct, results3.max_drawdown_pct, results3.sharpe_ratio, results3.alpha_pct);
-    println!("{:<45} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
-        "Ultra Aggressive WITH PM", results4.final_equity, results4.total_return_pct, results4.max_drawdown_pct, results4.sharpe_ratio, results4.alpha_pct);
-    println!("{}", "=".repeat(103));
-
-    // Calculate improvements
-    let conservative_improvement = ((results2.total_return_pct - results1.total_return_pct) / results1.total_return_pct) * dec!(100);
-    let aggressive_improvement = ((results4.total_return_pct - results3.total_return_pct) / results3.total_return_pct) * dec!(100);
-    let conservative_dd_improvement = results1.max_drawdown_pct - results2.max_drawdown_pct;
-    let aggressive_dd_improvement = results3.max_drawdown_pct - results4.max_drawdown_pct;
-
-    println!("\nPosition Management Impact:");
-    println!("  Conservative: Return improved by {:.2}%, Drawdown reduced by {:.2}%",
-        conservative_improvement, conservative_dd_improvement);
-    println!("  Aggressive: Return improved by {:.2}%, Drawdown reduced by {:.2}%",
-        aggressive_improvement, aggressive_dd_improvement);
+    println!("\n{:<25} {:>12} {:>12} {:>10} {:>10} {:>10}", "Scenario", "Final Equity", "Return %", "Max DD %", "Sharpe", "Alpha %");
+    println!("{}", "-".repeat(83));
+    println!("{:<25} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Conservative", results1.final_equity, results1.total_return_pct, results1.max_drawdown_pct, results1.sharpe_ratio, results1.alpha_pct);
+    println!("{:<25} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Moderate", results2.final_equity, results2.total_return_pct, results2.max_drawdown_pct, results2.sharpe_ratio, results2.alpha_pct);
+    println!("{:<25} ${:>11.2} {:>11.2}% {:>9.2}% {:>10.2} {:>9.2}%",
+        "Aggressive", results3.final_equity, results3.total_return_pct, results3.max_drawdown_pct, results3.sharpe_ratio, results3.alpha_pct);
+    println!("{}", "=".repeat(83));
 
     Ok(())
 }
@@ -857,7 +837,7 @@ async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize) -> 
         return Err(anyhow!("Walk-forward requires at least 2 windows"));
     }
 
-    info!("=== Walk-Forward Validation ===");
+    info!("=== Rolling Window Backtest ===");
     info!("Period: {} to {}", start_date, end_date);
     info!("Windows: {}", n_windows);
     info!("Pairs: BTC, ETH, SOL");

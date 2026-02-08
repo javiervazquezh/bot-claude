@@ -56,6 +56,16 @@ impl RiskManager {
             return false;
         }
 
+        // Check correlation group limits (max 2 in same group)
+        let group = pair.correlation_group();
+        let correlated_count = portfolio.positions.values()
+            .filter(|p| p.status == PositionStatus::Open && p.pair.correlation_group() == group)
+            .count();
+        if correlated_count >= 2 {
+            debug!("Correlation limit: {} positions in '{}' group", correlated_count, group);
+            return false;
+        }
+
         // Check max drawdown
         if portfolio.max_drawdown > limits.max_drawdown_pct {
             warn!("Max drawdown exceeded: {:.2}% > {:.2}%",

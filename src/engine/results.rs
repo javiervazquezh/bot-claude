@@ -220,7 +220,8 @@ pub struct WalkForwardResult {
 impl WalkForwardResult {
     pub fn print_summary(&self) {
         println!("\n{}", "=".repeat(80));
-        println!("                    WALK-FORWARD VALIDATION RESULTS");
+        println!("              ROLLING WINDOW BACKTEST RESULTS");
+        println!("  (Note: uses same strategy params per window, not re-optimized)");
         println!("{}", "=".repeat(80));
         println!("{:<8} {:>14} {:>14} {:>14} {:>14}", "Window", "IS Return %", "IS Sharpe", "OOS Return %", "OOS Sharpe");
         println!("{}", "-".repeat(80));
@@ -493,8 +494,12 @@ impl MetricsCalculator {
         let n = returns.len() as f64;
         let mean_return = returns.iter().sum::<f64>() / n;
 
-        // Standard deviation
-        let variance = returns.iter().map(|r| (r - mean_return).powi(2)).sum::<f64>() / n;
+        // Sample standard deviation (Bessel's correction: n-1)
+        let variance = if n > 1.0 {
+            returns.iter().map(|r| (r - mean_return).powi(2)).sum::<f64>() / (n - 1.0)
+        } else {
+            0.0
+        };
         let std_dev = variance.sqrt();
 
         // Sharpe ratio (risk-free rate = 0, annualized with sqrt(365) for crypto)
@@ -504,10 +509,14 @@ impl MetricsCalculator {
             0.0
         };
 
-        // Downside deviation (for Sortino) — uses all returns, zeroing positive ones
-        let downside_variance = returns.iter()
-            .map(|&r| if r < 0.0 { r.powi(2) } else { 0.0 })
-            .sum::<f64>() / n;
+        // Downside deviation (for Sortino) — sample formula
+        let downside_variance = if n > 1.0 {
+            returns.iter()
+                .map(|&r| if r < 0.0 { r.powi(2) } else { 0.0 })
+                .sum::<f64>() / (n - 1.0)
+        } else {
+            0.0
+        };
         let downside_dev = downside_variance.sqrt();
 
         let sortino = if downside_dev > 0.0 {

@@ -70,6 +70,14 @@ impl TradingPair {
         }
     }
 
+    pub fn correlation_group(&self) -> &'static str {
+        match self {
+            TradingPair::BTCUSDT => "btc",
+            TradingPair::ETHUSDT | TradingPair::SOLUSDT => "alt_major",
+            _ => "alt_minor",
+        }
+    }
+
     pub fn min_notional(&self) -> Decimal {
         Decimal::new(10, 0) // $10 minimum for Binance.US
     }

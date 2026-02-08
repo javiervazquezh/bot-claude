@@ -137,6 +137,7 @@ pub struct StochasticRSI {
     rsi_values: Vec<Decimal>,
     k_period: usize,
     d_period: usize,
+    raw_k_values: Vec<Decimal>,
     k_values: Vec<Decimal>,
 }
 
@@ -148,6 +149,7 @@ impl StochasticRSI {
             rsi_values: Vec::with_capacity(stoch_period),
             k_period,
             d_period,
+            raw_k_values: Vec::with_capacity(k_period),
             k_values: Vec::with_capacity(d_period),
         }
     }
@@ -168,12 +170,25 @@ impl StochasticRSI {
         let lowest = self.rsi_values.iter().min().copied()?;
 
         let range = highest - lowest;
-        let k = if range.is_zero() {
+        let raw_k = if range.is_zero() {
             Decimal::from(50)
         } else {
             ((rsi_value - lowest) / range) * Decimal::from(100)
         };
 
+        // Smooth raw K over k_period to produce %K
+        self.raw_k_values.push(raw_k);
+        if self.raw_k_values.len() > self.k_period {
+            self.raw_k_values.remove(0);
+        }
+
+        if self.raw_k_values.len() < self.k_period {
+            return None;
+        }
+
+        let k: Decimal = self.raw_k_values.iter().sum::<Decimal>() / Decimal::from(self.k_period as u32);
+
+        // Smooth %K over d_period to produce %D
         self.k_values.push(k);
         if self.k_values.len() > self.d_period {
             self.k_values.remove(0);
@@ -201,6 +216,7 @@ impl Indicator for StochasticRSI {
     fn reset(&mut self) {
         self.rsi.reset();
         self.rsi_values.clear();
+        self.raw_k_values.clear();
         self.k_values.clear();
     }
 }

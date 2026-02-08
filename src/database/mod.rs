@@ -363,6 +363,7 @@ impl Database {
                 strategy_id: row.get("strategy_id"),
                 order_ids: Vec::new(),
                 oco_order_id: None,
+                entry_fee: Decimal::ZERO,
             });
         }
 

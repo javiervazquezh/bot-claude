@@ -272,28 +272,34 @@ impl Strategy for BreakoutStrategy {
         }
 
         let current = candles.last()?;
-        let recent = candles.last_n(self.lookback_period);
 
-        let highest = recent.iter().map(|c| c.high).max()?;
-        let lowest = recent.iter().map(|c| c.low).min()?;
+        // Get lookback candles EXCLUDING the current candle
+        let history = candles.last_n(self.lookback_period + 1);
+        let prior = &history[..history.len().saturating_sub(1)];
+        if prior.is_empty() {
+            return None;
+        }
+
+        let highest = prior.iter().map(|c| c.high).max()?;
+        let lowest = prior.iter().map(|c| c.low).min()?;
         let atr = self.atr.value()?;
         let threshold = atr * self.breakout_threshold;
 
-        let (signal, confidence, reason) = if current.close > highest {
-            let breakout_strength = (current.close - highest) / atr;
+        let (signal, confidence, reason) = if current.close > highest + threshold {
+            let breakout_strength = (current.close - highest - threshold) / atr;
             let conf = Decimal::new(60, 2) + (breakout_strength * Decimal::new(10, 2)).min(Decimal::new(30, 2));
             (
                 Signal::StrongBuy,
                 conf,
-                format!("Bullish breakout above {:.2}", highest),
+                format!("Bullish breakout above {:.2} (threshold {:.2})", highest, threshold),
             )
-        } else if current.close < lowest {
-            let breakout_strength = (lowest - current.close) / atr;
+        } else if current.close < lowest - threshold {
+            let breakout_strength = (lowest - threshold - current.close) / atr;
             let conf = Decimal::new(60, 2) + (breakout_strength * Decimal::new(10, 2)).min(Decimal::new(30, 2));
             (
                 Signal::StrongSell,
                 conf,
-                format!("Bearish breakout below {:.2}", lowest),
+                format!("Bearish breakout below {:.2} (threshold {:.2})", lowest, threshold),
             )
         } else {
             (
@@ -325,7 +331,7 @@ impl Strategy for BreakoutStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        self.lookback_period + 14
+        self.lookback_period + 14 + 1 // +1 for excluding current candle
     }
 
     fn reset(&mut self) {

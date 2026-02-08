@@ -87,15 +87,20 @@ impl PaperTradingEngine {
     }
 
     pub async fn update_price(&self, pair: TradingPair, price: Decimal) {
-        let mut prices = self.prices.write().await;
-        prices.insert(pair, price);
+        // Acquire and release prices lock in its own scope to prevent lock ordering deadlock
+        // (portfolio_summary acquires portfolio→prices; we must not hold prices→portfolio)
+        {
+            let mut prices = self.prices.write().await;
+            prices.insert(pair, price);
+        }
 
-        // Update position prices
-        let mut portfolio = self.portfolio.write().await;
-        portfolio.update_position_price(pair, price);
+        // Now safely acquire portfolio lock without holding prices
+        {
+            let mut portfolio = self.portfolio.write().await;
+            portfolio.update_position_price(pair, price);
+        }
 
         // Check pending orders
-        drop(portfolio);
         self.check_pending_orders(pair, price).await;
     }
 

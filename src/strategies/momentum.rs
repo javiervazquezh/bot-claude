@@ -68,12 +68,12 @@ impl MomentumStrategy {
     }
 
     fn analyze_momentum(&self, rsi: Decimal, price_vs_fast: bool, price_vs_slow: bool) -> (Signal, &str) {
-        let is_strong_bullish = rsi > Decimal::from(50) && rsi < self.rsi_overbought
+        let is_strong_bullish = rsi > Decimal::from(55) && rsi < self.rsi_overbought
             && price_vs_fast && price_vs_slow;
-        let is_bullish = rsi > Decimal::from(45) && price_vs_fast;
-        let is_strong_bearish = rsi < Decimal::from(50) && rsi > self.rsi_oversold
+        let is_bullish = rsi > Decimal::from(50) && price_vs_fast;
+        let is_strong_bearish = rsi < Decimal::from(45) && rsi > self.rsi_oversold
             && !price_vs_fast && !price_vs_slow;
-        let is_bearish = rsi < Decimal::from(55) && !price_vs_fast;
+        let is_bearish = rsi < Decimal::from(50) && !price_vs_fast;
 
         if is_strong_bullish {
             (Signal::StrongBuy, "Strong bullish momentum with volume")
