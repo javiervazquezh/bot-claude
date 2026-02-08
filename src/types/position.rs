@@ -26,10 +26,14 @@ pub struct Position {
     pub take_profit: Option<Decimal>,
     pub unrealized_pnl: Decimal,
     pub realized_pnl: Decimal,
+    #[serde(default)]
+    pub peak_pnl_pct: Decimal,
     pub opened_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
     pub strategy_id: String,
     pub order_ids: Vec<String>,
+    #[serde(default)]
+    pub oco_order_id: Option<String>,
 }
 
 impl Position {
@@ -52,16 +56,22 @@ impl Position {
             take_profit: None,
             unrealized_pnl: Decimal::ZERO,
             realized_pnl: Decimal::ZERO,
+            peak_pnl_pct: Decimal::ZERO,
             opened_at: Utc::now(),
             closed_at: None,
             strategy_id,
             order_ids: Vec::new(),
+            oco_order_id: None,
         }
     }
 
     pub fn update_price(&mut self, price: Decimal) {
         self.current_price = price;
         self.unrealized_pnl = self.calculate_pnl(price);
+        let pnl_pct = self.pnl_percentage();
+        if pnl_pct > self.peak_pnl_pct {
+            self.peak_pnl_pct = pnl_pct;
+        }
     }
 
     pub fn calculate_pnl(&self, price: Decimal) -> Decimal {
@@ -117,6 +127,7 @@ impl Position {
         self.current_price = exit_price;
         self.realized_pnl = self.calculate_pnl(exit_price);
         self.unrealized_pnl = Decimal::ZERO;
+        self.peak_pnl_pct = Decimal::ZERO;
         self.status = PositionStatus::Closed;
         self.closed_at = Some(Utc::now());
     }

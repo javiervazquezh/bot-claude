@@ -14,6 +14,7 @@ pub struct MeanReversionStrategy {
     atr: ATR,
     rsi_oversold: Decimal,
     rsi_overbought: Decimal,
+    candles_processed: usize,
 }
 
 impl MeanReversionStrategy {
@@ -26,6 +27,7 @@ impl MeanReversionStrategy {
             atr: ATR::new(14),
             rsi_oversold: Decimal::from(25),
             rsi_overbought: Decimal::from(75),
+            candles_processed: 0,
         }
     }
 
@@ -38,6 +40,7 @@ impl MeanReversionStrategy {
             atr: ATR::new(14),
             rsi_oversold: Decimal::from(20),
             rsi_overbought: Decimal::from(80),
+            candles_processed: 0,
         }
     }
 
@@ -111,12 +114,22 @@ impl Strategy for MeanReversionStrategy {
             return None;
         }
 
-        // Update indicators
-        for candle in candles.candles.iter() {
-            self.bollinger.update(candle.close);
-            self.rsi.update(candle.close);
-            self.atr.update(candle.high, candle.low, candle.close);
+        // Update indicators with NEW candles only (incremental)
+        let len = candles.len();
+        let start = if self.candles_processed == 0 {
+            0
+        } else if self.candles_processed < len {
+            self.candles_processed
+        } else {
+            len - 1
+        };
+        for i in start..len {
+            let c = &candles.candles[i];
+            self.bollinger.update(c.close);
+            self.rsi.update(c.close);
+            self.atr.update(c.high, c.low, c.close);
         }
+        self.candles_processed = len;
 
         if !self.bollinger.is_ready() || !self.rsi.is_ready() || !self.atr.is_ready() {
             return None;
@@ -163,6 +176,7 @@ impl Strategy for MeanReversionStrategy {
         self.bollinger.reset();
         self.rsi.reset();
         self.atr.reset();
+        self.candles_processed = 0;
     }
 }
 
@@ -175,6 +189,7 @@ pub struct RSIDivergenceStrategy {
     atr: ATR,
     lookback: usize,
     price_history: Vec<(Decimal, Decimal)>, // (price, rsi)
+    candles_processed: usize,
 }
 
 impl RSIDivergenceStrategy {
@@ -186,6 +201,7 @@ impl RSIDivergenceStrategy {
             atr: ATR::new(14),
             lookback: 14,
             price_history: Vec::with_capacity(20),
+            candles_processed: 0,
         }
     }
 
@@ -224,16 +240,26 @@ impl Strategy for RSIDivergenceStrategy {
             return None;
         }
 
-        // Update indicators and track history
-        for candle in candles.candles.iter() {
-            if let Some(rsi) = self.rsi.update(candle.close) {
-                self.price_history.push((candle.close, rsi));
+        // Update indicators with NEW candles only (incremental)
+        let len = candles.len();
+        let start = if self.candles_processed == 0 {
+            0
+        } else if self.candles_processed < len {
+            self.candles_processed
+        } else {
+            len - 1
+        };
+        for i in start..len {
+            let c = &candles.candles[i];
+            if let Some(rsi) = self.rsi.update(c.close) {
+                self.price_history.push((c.close, rsi));
                 if self.price_history.len() > 50 {
                     self.price_history.remove(0);
                 }
             }
-            self.atr.update(candle.high, candle.low, candle.close);
+            self.atr.update(c.high, c.low, c.close);
         }
+        self.candles_processed = len;
 
         if !self.rsi.is_ready() || !self.atr.is_ready() {
             return None;
@@ -295,5 +321,6 @@ impl Strategy for RSIDivergenceStrategy {
         self.rsi.reset();
         self.atr.reset();
         self.price_history.clear();
+        self.candles_processed = 0;
     }
 }

@@ -13,6 +13,7 @@ pub enum OrderType {
     StopLossLimit,
     TakeProfit,
     TakeProfitLimit,
+    OCO,
 }
 
 impl OrderType {
@@ -24,6 +25,7 @@ impl OrderType {
             OrderType::StopLossLimit => "STOP_LOSS_LIMIT",
             OrderType::TakeProfit => "TAKE_PROFIT",
             OrderType::TakeProfitLimit => "TAKE_PROFIT_LIMIT",
+            OrderType::OCO => "OCO",
         }
     }
 }
@@ -177,6 +179,47 @@ impl Order {
     pub fn notional_value(&self) -> Option<Decimal> {
         self.average_fill_price.map(|p| p * self.filled_quantity)
     }
+}
+
+/// OCO (One-Cancels-Other) order request for exchange-side stop-loss + take-profit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OCOOrderRequest {
+    pub list_client_order_id: String,
+    pub pair: TradingPair,
+    pub side: Side,
+    pub quantity: Decimal,
+    pub price: Decimal,            // Limit price (take profit)
+    pub stop_price: Decimal,       // Stop trigger price
+    pub stop_limit_price: Decimal, // Stop limit execution price
+}
+
+impl OCOOrderRequest {
+    pub fn new(
+        pair: TradingPair,
+        side: Side,
+        quantity: Decimal,
+        take_profit_price: Decimal,
+        stop_loss_price: Decimal,
+    ) -> Self {
+        // Stop limit price slightly below stop price for fill probability
+        let stop_limit_price = stop_loss_price * (Decimal::ONE - Decimal::new(1, 3)); // 0.1% below
+        Self {
+            list_client_order_id: Uuid::new_v4().to_string(),
+            pair,
+            side,
+            quantity,
+            price: take_profit_price,
+            stop_price: stop_loss_price,
+            stop_limit_price,
+        }
+    }
+}
+
+/// Response from an OCO order placement
+#[derive(Debug, Clone)]
+pub struct OCOOrderResult {
+    pub list_order_id: String,
+    pub list_client_order_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

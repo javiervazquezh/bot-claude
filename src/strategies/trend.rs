@@ -15,6 +15,7 @@ pub struct TrendStrategy {
     min_trend_strength: Decimal,
     atr_multiplier_sl: Decimal,
     atr_multiplier_tp: Decimal,
+    candles_processed: usize,
 }
 
 impl TrendStrategy {
@@ -28,6 +29,7 @@ impl TrendStrategy {
             min_trend_strength: Decimal::new(5, 1), // 0.5% minimum spread
             atr_multiplier_sl: Decimal::new(15, 1), // 1.5x ATR for stop loss
             atr_multiplier_tp: Decimal::new(30, 1), // 3x ATR for take profit
+            candles_processed: 0,
         }
     }
 
@@ -46,6 +48,7 @@ impl TrendStrategy {
             min_trend_strength: Decimal::new(5, 1),
             atr_multiplier_sl: Decimal::new(15, 1),
             atr_multiplier_tp: Decimal::new(30, 1),
+            candles_processed: 0,
         }
     }
 
@@ -99,12 +102,22 @@ impl Strategy for TrendStrategy {
             return None;
         }
 
-        // Update indicators with all candles
-        for candle in candles.candles.iter() {
-            self.ema.update(candle.close);
-            self.macd.update(candle.close);
-            self.atr.update(candle.high, candle.low, candle.close);
+        // Update indicators with NEW candles only (incremental)
+        let len = candles.len();
+        let start = if self.candles_processed == 0 {
+            0
+        } else if self.candles_processed < len {
+            self.candles_processed
+        } else {
+            len - 1
+        };
+        for i in start..len {
+            let c = &candles.candles[i];
+            self.ema.update(c.close);
+            self.macd.update(c.close);
+            self.atr.update(c.high, c.low, c.close);
         }
+        self.candles_processed = len;
 
         // Check if indicators are ready
         if !self.ema.is_ready() || !self.macd.is_ready() || !self.atr.is_ready() {
@@ -178,6 +191,7 @@ impl Strategy for TrendStrategy {
         self.ema.reset();
         self.macd.reset();
         self.atr.reset();
+        self.candles_processed = 0;
     }
 }
 
@@ -189,6 +203,7 @@ pub struct BreakoutStrategy {
     lookback_period: usize,
     atr: ATR,
     breakout_threshold: Decimal,
+    candles_processed: usize,
 }
 
 impl BreakoutStrategy {
@@ -199,6 +214,7 @@ impl BreakoutStrategy {
             lookback_period: 20,
             atr: ATR::new(14),
             breakout_threshold: Decimal::new(15, 1), // 1.5x ATR
+            candles_processed: 0,
         }
     }
 }
@@ -217,10 +233,20 @@ impl Strategy for BreakoutStrategy {
             return None;
         }
 
-        // Update ATR
-        for candle in candles.candles.iter() {
-            self.atr.update(candle.high, candle.low, candle.close);
+        // Update ATR with NEW candles only (incremental)
+        let len = candles.len();
+        let start = if self.candles_processed == 0 {
+            0
+        } else if self.candles_processed < len {
+            self.candles_processed
+        } else {
+            len - 1
+        };
+        for i in start..len {
+            let c = &candles.candles[i];
+            self.atr.update(c.high, c.low, c.close);
         }
+        self.candles_processed = len;
 
         if !self.atr.is_ready() {
             return None;
@@ -285,5 +311,6 @@ impl Strategy for BreakoutStrategy {
 
     fn reset(&mut self) {
         self.atr.reset();
+        self.candles_processed = 0;
     }
 }

@@ -190,6 +190,7 @@ impl RiskManager {
     pub async fn should_close_position(
         &self,
         pnl_pct: Decimal,
+        peak_pnl_pct: Decimal,
         holding_duration_hours: i64,
     ) -> Option<CloseReason> {
         let config = self.config.read().await;
@@ -210,11 +211,10 @@ impl RiskManager {
             return Some(CloseReason::TimeLimit);
         }
 
-        // Trailing stop logic
-        if pnl_pct > Decimal::from(5) {
-            // Once 5% profit, use tighter stop
-            let trailing_stop = pnl_pct - Decimal::from(2); // Trail by 2%
-            if trailing_stop > Decimal::ZERO && pnl_pct < trailing_stop {
+        // Trailing stop: once peak PnL exceeded 5%, trail by 2% from peak
+        if peak_pnl_pct > Decimal::from(5) {
+            let trailing_stop_level = peak_pnl_pct - Decimal::from(2);
+            if pnl_pct < trailing_stop_level {
                 return Some(CloseReason::TrailingStop);
             }
         }
@@ -266,6 +266,22 @@ impl RiskManager {
         }
     }
 
+    /// Check if portfolio drawdown exceeds limits and all positions should be force-closed
+    pub async fn check_emergency_stop(&self, portfolio: &Portfolio) -> bool {
+        let config = self.config.read().await;
+        let limits = &config.risk;
+
+        if portfolio.max_drawdown > limits.max_drawdown_pct {
+            warn!(
+                "EMERGENCY STOP: Drawdown {:.2}% exceeds maximum {:.2}%. Force-closing all positions.",
+                portfolio.max_drawdown, limits.max_drawdown_pct
+            );
+            return true;
+        }
+
+        false
+    }
+
     pub fn config_arc(&self) -> Arc<RwLock<RuntimeConfig>> {
         Arc::clone(&self.config)
     }
@@ -279,6 +295,7 @@ pub enum CloseReason {
     TimeLimit,
     Manual,
     Signal,
+    EmergencyStop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

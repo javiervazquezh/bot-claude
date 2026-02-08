@@ -10,7 +10,8 @@ use std::str::FromStr;
 use tracing::{debug, info, warn};
 
 use crate::types::{
-    Candle, Order, OrderRequest, OrderStatus, OrderType, Side, Ticker, TimeFrame, TimeInForce, TradingPair,
+    Candle, OCOOrderRequest, OCOOrderResult, Order, OrderRequest, OrderStatus, OrderType, Side,
+    Ticker, TimeFrame, TimeInForce, TradingPair,
 };
 
 const BINANCE_US_API: &str = "https://api.binance.us";
@@ -309,6 +310,81 @@ impl BinanceClient {
 
         let order_resp: OrderResponse = resp.json().await?;
         self.convert_order_response(order_resp, request.pair)
+    }
+
+    /// Place an OCO (One-Cancels-Other) order for exchange-side stop-loss + take-profit
+    pub async fn place_oco_order(&self, request: &OCOOrderRequest) -> Result<OCOOrderResult> {
+        let url = format!("{}/api/v3/orderList/oco", self.base_url);
+
+        let mut params: HashMap<&str, String> = HashMap::new();
+        params.insert("symbol", request.pair.as_str().to_string());
+        params.insert("side", request.side.as_str().to_string());
+        params.insert("quantity", request.quantity.to_string());
+        params.insert("price", request.price.to_string());
+        params.insert("stopPrice", request.stop_price.to_string());
+        params.insert("stopLimitPrice", request.stop_limit_price.to_string());
+        params.insert("stopLimitTimeInForce", "GTC".to_string());
+        params.insert("listClientOrderId", request.list_client_order_id.clone());
+
+        let query = self.build_signed_query(&params);
+        let full_url = format!("{}?{}", url, query);
+
+        debug!("Placing OCO order: {:?}", request);
+
+        let resp = self
+            .client
+            .post(&full_url)
+            .header("X-MBX-APIKEY", &self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let error_text = resp.text().await?;
+            return Err(anyhow!("OCO order placement failed: {}", error_text));
+        }
+
+        let oco_resp: serde_json::Value = resp.json().await?;
+        let list_order_id = oco_resp["orderListId"]
+            .as_u64()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
+        info!(
+            "OCO order placed: SL={}, TP={}, list_id={}",
+            request.stop_price, request.price, list_order_id
+        );
+
+        Ok(OCOOrderResult {
+            list_order_id,
+            list_client_order_id: request.list_client_order_id.clone(),
+        })
+    }
+
+    /// Cancel an OCO order list
+    pub async fn cancel_oco_order(&self, pair: TradingPair, list_client_order_id: &str) -> Result<()> {
+        let url = format!("{}/api/v3/orderList", self.base_url);
+
+        let mut params: HashMap<&str, String> = HashMap::new();
+        params.insert("symbol", pair.as_str().to_string());
+        params.insert("listClientOrderId", list_client_order_id.to_string());
+
+        let query = self.build_signed_query(&params);
+        let full_url = format!("{}?{}", url, query);
+
+        let resp = self
+            .client
+            .delete(&full_url)
+            .header("X-MBX-APIKEY", &self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let error_text = resp.text().await?;
+            return Err(anyhow!("OCO cancellation failed: {}", error_text));
+        }
+
+        info!("OCO order {} cancelled", list_client_order_id);
+        Ok(())
     }
 
     pub async fn cancel_order(&self, pair: TradingPair, order_id: &str) -> Result<()> {

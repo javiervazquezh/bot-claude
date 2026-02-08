@@ -17,6 +17,7 @@ pub struct MomentumStrategy {
     rsi_overbought: Decimal,
     rsi_oversold: Decimal,
     volume_threshold: Decimal,
+    candles_processed: usize,
 }
 
 impl MomentumStrategy {
@@ -32,6 +33,7 @@ impl MomentumStrategy {
             rsi_overbought: Decimal::from(70),
             rsi_oversold: Decimal::from(30),
             volume_threshold: Decimal::new(15, 1), // 1.5x average volume
+            candles_processed: 0,
         }
     }
 
@@ -47,6 +49,7 @@ impl MomentumStrategy {
             rsi_overbought: Decimal::from(65),
             rsi_oversold: Decimal::from(35),
             volume_threshold: Decimal::new(12, 1),
+            candles_processed: 0,
         }
     }
 
@@ -86,14 +89,24 @@ impl Strategy for MomentumStrategy {
             return None;
         }
 
-        // Update indicators
-        for candle in candles.candles.iter() {
-            self.rsi.update(candle.close);
-            self.ema_fast.update(candle.close);
-            self.ema_slow.update(candle.close);
-            self.volume_profile.update(candle.volume);
-            self.atr.update(candle.high, candle.low, candle.close);
+        // Update indicators with NEW candles only (incremental)
+        let len = candles.len();
+        let start = if self.candles_processed == 0 {
+            0
+        } else if self.candles_processed < len {
+            self.candles_processed
+        } else {
+            len - 1
+        };
+        for i in start..len {
+            let c = &candles.candles[i];
+            self.rsi.update(c.close);
+            self.ema_fast.update(c.close);
+            self.ema_slow.update(c.close);
+            self.volume_profile.update(c.volume);
+            self.atr.update(c.high, c.low, c.close);
         }
+        self.candles_processed = len;
 
         if !self.rsi.is_ready() || !self.ema_fast.is_ready() || !self.ema_slow.is_ready() {
             return None;
@@ -165,6 +178,7 @@ impl Strategy for MomentumStrategy {
         self.ema_slow.reset();
         self.volume_profile.reset();
         self.atr.reset();
+        self.candles_processed = 0;
     }
 }
 
@@ -177,6 +191,7 @@ pub struct VolumeBreakoutStrategy {
     atr: ATR,
     lookback: usize,
     volume_multiplier: Decimal,
+    candles_processed: usize,
 }
 
 impl VolumeBreakoutStrategy {
@@ -188,6 +203,7 @@ impl VolumeBreakoutStrategy {
             atr: ATR::new(14),
             lookback: 10,
             volume_multiplier: Decimal::from(2),
+            candles_processed: 0,
         }
     }
 }
@@ -206,10 +222,21 @@ impl Strategy for VolumeBreakoutStrategy {
             return None;
         }
 
-        for candle in candles.candles.iter() {
-            self.volume_profile.update(candle.volume);
-            self.atr.update(candle.high, candle.low, candle.close);
+        // Update indicators with NEW candles only (incremental)
+        let len = candles.len();
+        let start = if self.candles_processed == 0 {
+            0
+        } else if self.candles_processed < len {
+            self.candles_processed
+        } else {
+            len - 1
+        };
+        for i in start..len {
+            let c = &candles.candles[i];
+            self.volume_profile.update(c.volume);
+            self.atr.update(c.high, c.low, c.close);
         }
+        self.candles_processed = len;
 
         let current = candles.last()?;
         let recent = candles.last_n(self.lookback);
@@ -282,5 +309,6 @@ impl Strategy for VolumeBreakoutStrategy {
     fn reset(&mut self) {
         self.volume_profile.reset();
         self.atr.reset();
+        self.candles_processed = 0;
     }
 }

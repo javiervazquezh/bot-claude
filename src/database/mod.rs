@@ -7,7 +7,7 @@ use std::path::Path;
 use std::str::FromStr;
 use tracing::info;
 
-use crate::types::{Side, TradingPair};
+use crate::types::{Position, PositionStatus, Side, TradingPair};
 use crate::web::state::TradeRecord;
 
 pub struct Database {
@@ -227,7 +227,222 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // Positions table for state persistence across restarts
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS positions (
+                id TEXT PRIMARY KEY,
+                pair TEXT NOT NULL,
+                side TEXT NOT NULL,
+                status TEXT NOT NULL,
+                entry_price TEXT NOT NULL,
+                current_price TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                stop_loss TEXT,
+                take_profit TEXT,
+                unrealized_pnl TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                peak_pnl_pct TEXT NOT NULL DEFAULT '0',
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                strategy_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Portfolio state table (single row, upserted on each save)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS portfolio_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                usdt_balance TEXT NOT NULL,
+                initial_capital TEXT NOT NULL,
+                total_pnl TEXT NOT NULL,
+                peak_equity TEXT NOT NULL,
+                max_drawdown TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
+    }
+
+    /// Save or update a position in the database
+    pub async fn upsert_position(&self, position: &Position) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO positions (
+                id, pair, side, status, entry_price, current_price, quantity,
+                stop_loss, take_profit, unrealized_pnl, realized_pnl, peak_pnl_pct,
+                opened_at, closed_at, strategy_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                current_price = excluded.current_price,
+                stop_loss = excluded.stop_loss,
+                take_profit = excluded.take_profit,
+                unrealized_pnl = excluded.unrealized_pnl,
+                realized_pnl = excluded.realized_pnl,
+                peak_pnl_pct = excluded.peak_pnl_pct,
+                closed_at = excluded.closed_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&position.id)
+        .bind(position.pair.as_str())
+        .bind(format!("{:?}", position.side))
+        .bind(format!("{:?}", position.status))
+        .bind(position.entry_price.to_string())
+        .bind(position.current_price.to_string())
+        .bind(position.quantity.to_string())
+        .bind(position.stop_loss.map(|p| p.to_string()))
+        .bind(position.take_profit.map(|p| p.to_string()))
+        .bind(position.unrealized_pnl.to_string())
+        .bind(position.realized_pnl.to_string())
+        .bind(position.peak_pnl_pct.to_string())
+        .bind(position.opened_at.to_rfc3339())
+        .bind(position.closed_at.map(|t| t.to_rfc3339()))
+        .bind(&position.strategy_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Load all open positions from the database
+    pub async fn get_open_positions(&self) -> Result<Vec<Position>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, pair, side, status, entry_price, current_price, quantity,
+                   stop_loss, take_profit, unrealized_pnl, realized_pnl, peak_pnl_pct,
+                   opened_at, closed_at, strategy_id
+            FROM positions
+            WHERE status = 'Open'
+            ORDER BY opened_at ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut positions = Vec::new();
+        for row in rows {
+            positions.push(Position {
+                id: row.get("id"),
+                pair: parse_trading_pair(row.get("pair"))?,
+                side: parse_side(row.get("side"))?,
+                status: PositionStatus::Open,
+                entry_price: Decimal::from_str(row.get("entry_price"))?,
+                current_price: Decimal::from_str(row.get("current_price"))?,
+                quantity: Decimal::from_str(row.get("quantity"))?,
+                stop_loss: row.get::<Option<String>, _>("stop_loss")
+                    .and_then(|s| Decimal::from_str(&s).ok()),
+                take_profit: row.get::<Option<String>, _>("take_profit")
+                    .and_then(|s| Decimal::from_str(&s).ok()),
+                unrealized_pnl: Decimal::from_str(row.get("unrealized_pnl"))?,
+                realized_pnl: Decimal::from_str(row.get("realized_pnl"))?,
+                peak_pnl_pct: row.get::<Option<String>, _>("peak_pnl_pct")
+                    .and_then(|s| Decimal::from_str(&s).ok())
+                    .unwrap_or(Decimal::ZERO),
+                opened_at: DateTime::parse_from_rfc3339(row.get("opened_at"))?.with_timezone(&Utc),
+                closed_at: None,
+                strategy_id: row.get("strategy_id"),
+                order_ids: Vec::new(),
+                oco_order_id: None,
+            });
+        }
+
+        Ok(positions)
+    }
+
+    /// Mark a position as closed in the database
+    pub async fn close_position_in_db(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE positions
+            SET status = 'Closed', closed_at = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Save portfolio state (single-row upsert)
+    pub async fn save_portfolio_state(
+        &self,
+        usdt_balance: Decimal,
+        initial_capital: Decimal,
+        total_pnl: Decimal,
+        peak_equity: Decimal,
+        max_drawdown: Decimal,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO portfolio_state (id, usdt_balance, initial_capital, total_pnl, peak_equity, max_drawdown, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                usdt_balance = excluded.usdt_balance,
+                initial_capital = excluded.initial_capital,
+                total_pnl = excluded.total_pnl,
+                peak_equity = excluded.peak_equity,
+                max_drawdown = excluded.max_drawdown,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(usdt_balance.to_string())
+        .bind(initial_capital.to_string())
+        .bind(total_pnl.to_string())
+        .bind(peak_equity.to_string())
+        .bind(max_drawdown.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Load portfolio state
+    pub async fn load_portfolio_state(&self) -> Result<Option<(Decimal, Decimal, Decimal, Decimal, Decimal)>> {
+        let row = sqlx::query(
+            r#"
+            SELECT usdt_balance, initial_capital, total_pnl, peak_equity, max_drawdown
+            FROM portfolio_state
+            WHERE id = 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => Ok(Some((
+                Decimal::from_str(row.get("usdt_balance"))?,
+                Decimal::from_str(row.get("initial_capital"))?,
+                Decimal::from_str(row.get("total_pnl"))?,
+                Decimal::from_str(row.get("peak_equity"))?,
+                Decimal::from_str(row.get("max_drawdown"))?,
+            ))),
+            None => Ok(None),
+        }
     }
 
     /// Insert a trade record

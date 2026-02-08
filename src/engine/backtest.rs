@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::exchange::BinanceClient;
-use crate::strategies::{ImprovedStrategy, Strategy, StrategySignal, create_improved_strategy};
+use crate::strategies::{Strategy, StrategySignal, create_improved_strategy, create_strategies_for_pair};
 use crate::types::{Candle, CandleBuffer, Position, PositionStatus, Side, Signal, TimeFrame, TradingPair};
 
 use super::results::{BacktestResults, EquityPoint, ExitReason, MetricsCalculator, TradeRecord};
@@ -52,7 +52,7 @@ pub struct BacktestEngine {
     config: BacktestConfig,
     exchange: BinanceClient,
     portfolio: Portfolio,
-    strategies: HashMap<TradingPair, ImprovedStrategy>,
+    strategies: HashMap<TradingPair, Box<dyn Strategy>>,
     candle_buffers: HashMap<TradingPair, CandleBuffer>,
     current_prices: HashMap<TradingPair, Decimal>,
     equity_curve: Vec<EquityPoint>,
@@ -62,7 +62,20 @@ pub struct BacktestEngine {
 }
 
 impl BacktestEngine {
+    /// Create engine with CombinedStrategy (matches live trading path)
     pub fn new(config: BacktestConfig) -> Self {
+        Self::with_strategy_factory(config, |pair| Box::new(create_strategies_for_pair(pair)))
+    }
+
+    /// Create engine with ImprovedStrategy (legacy backtest path)
+    pub fn with_improved_strategy(config: BacktestConfig) -> Self {
+        Self::with_strategy_factory(config, |pair| Box::new(create_improved_strategy(pair)))
+    }
+
+    fn with_strategy_factory(
+        config: BacktestConfig,
+        factory: impl Fn(TradingPair) -> Box<dyn Strategy>,
+    ) -> Self {
         let portfolio = Portfolio::new(config.initial_capital);
 
         let mut strategies = HashMap::new();
@@ -70,7 +83,7 @@ impl BacktestEngine {
         let mut current_prices = HashMap::new();
 
         for pair in &config.pairs {
-            strategies.insert(*pair, create_improved_strategy(*pair));
+            strategies.insert(*pair, factory(*pair));
             candle_buffers.insert(*pair, CandleBuffer::new(200));
             current_prices.insert(*pair, Decimal::ZERO);
         }
@@ -187,15 +200,18 @@ impl BacktestEngine {
             buffer.push(candle.clone());
         }
 
-        // 3. Update position prices and check stops
+        // 3. Update position prices and check stops using candle high/low
         self.portfolio.update_position_price(pair, price);
-        self.check_stops(pair, price, candle.open_time)?;
+        self.check_stops(pair, &candle)?;
 
         // 4. Run strategy analysis
         self.run_strategy(pair, price, candle.open_time)?;
 
-        // 5. Update drawdown
+        // 5. Update drawdown and check emergency stop
         self.portfolio.update_drawdown(&self.current_prices);
+        if self.portfolio.max_drawdown > dec!(15) {
+            self.close_all_positions()?;
+        }
 
         // 6. Record equity point periodically (every 100 candles to save memory)
         self.candles_processed += 1;
@@ -353,10 +369,12 @@ impl BacktestEngine {
             take_profit: signal.suggested_take_profit,
             unrealized_pnl: Decimal::ZERO,
             realized_pnl: Decimal::ZERO,
+            peak_pnl_pct: Decimal::ZERO,
             opened_at: timestamp,
             closed_at: None,
             strategy_id: signal.strategy_name.clone(),
             order_ids: Vec::new(),
+            oco_order_id: None,
         };
 
         debug!(
@@ -388,25 +406,27 @@ impl BacktestEngine {
         self.close_position_internal(&position, price, timestamp, ExitReason::Signal)
     }
 
-    fn check_stops(&mut self, pair: TradingPair, price: Decimal, timestamp: DateTime<Utc>) -> Result<()> {
+    fn check_stops(&mut self, pair: TradingPair, candle: &Candle) -> Result<()> {
         let position = match self.portfolio.get_position_for_pair(pair) {
             Some(p) => p.clone(),
             None => return Ok(()),
         };
 
-        // Check stop loss
+        // Check stop loss against candle LOW (worst case for longs)
         if let Some(sl) = position.stop_loss {
-            if price <= sl {
-                debug!("[{}] Stop loss triggered at ${:.2}", pair, price);
-                return self.close_position_internal(&position, price, timestamp, ExitReason::StopLoss);
+            if candle.low <= sl {
+                debug!("[{}] Stop loss triggered: low={:.2} <= sl={:.2}", pair, candle.low, sl);
+                // Execute at stop price, not at the low
+                return self.close_position_internal(&position, sl, candle.open_time, ExitReason::StopLoss);
             }
         }
 
-        // Check take profit
+        // Check take profit against candle HIGH (best case for longs)
         if let Some(tp) = position.take_profit {
-            if price >= tp {
-                debug!("[{}] Take profit triggered at ${:.2}", pair, price);
-                return self.close_position_internal(&position, price, timestamp, ExitReason::TakeProfit);
+            if candle.high >= tp {
+                debug!("[{}] Take profit triggered: high={:.2} >= tp={:.2}", pair, candle.high, tp);
+                // Execute at take profit price, not at the high
+                return self.close_position_internal(&position, tp, candle.open_time, ExitReason::TakeProfit);
             }
         }
 
