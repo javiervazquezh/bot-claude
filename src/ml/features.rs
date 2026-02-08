@@ -109,9 +109,9 @@ pub fn extract_features(
     let volume_ratio = approximate_volume_ratio(candles, 20).unwrap_or(1.0);
 
     // Volatility regime from ATR
-    let volatility_regime = if atr_pct < 1.0 { 0.0 }
-        else if atr_pct < 2.0 { 1.0 }
-        else if atr_pct < 4.0 { 2.0 }
+    let volatility_regime = if atr_pct < 0.5 { 0.0 }
+        else if atr_pct < 1.0 { 1.0 }
+        else if atr_pct < 2.0 { 2.0 }
         else { 3.0 };
 
     // Recent performance features

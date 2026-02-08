@@ -120,9 +120,9 @@ impl BacktestEngine {
         let mut atr_indicators = HashMap::new();
         for pair in &config.pairs {
             strategies.insert(*pair, factory(*pair));
-            candle_buffers.insert(*pair, CandleBuffer::new(200));
+            candle_buffers.insert(*pair, CandleBuffer::new(500));
             current_prices.insert(*pair, Decimal::ZERO);
-            atr_indicators.insert(*pair, crate::indicators::atr::ATR::new(14));
+            atr_indicators.insert(*pair, crate::indicators::atr::ATR::new(28));
         }
 
         Self {
@@ -497,7 +497,7 @@ impl BacktestEngine {
             }
         }
 
-        // Check cooldown: skip re-entry within 6 candles after a stop-loss exit
+        // Check cooldown: skip re-entry within 24 candles after a stop-loss exit (~24h at 1H)
         if side == Some(Side::Buy) && !has_position {
             if let Some(&exit_candle) = self.last_exit_candle.get(&signal.pair) {
                 let is_stoploss = self.last_exit_was_stoploss.get(&signal.pair).copied().unwrap_or(false);
@@ -709,18 +709,18 @@ impl BacktestEngine {
             }
         }
 
-        // Trailing stop: if position reached 12%+ profit, trail at 5% from peak
-        // Wide thresholds for H4 candles where 3-5% retracements are normal
+        // Trailing stop: if position reached 8%+ profit, trail at 3% from peak
+        // Balanced thresholds for H1 candles
         let current_peak = if best_pnl_pct > position.peak_pnl_pct {
             best_pnl_pct
         } else {
             position.peak_pnl_pct
         };
-        if current_peak >= dec!(12) {
+        if current_peak >= dec!(15) {
             let current_pnl_pct = (candle.low - position.entry_price) / position.entry_price * dec!(100);
             let drawdown_from_peak = current_peak - current_pnl_pct;
-            if drawdown_from_peak >= dec!(5) {
-                let trail_price = position.entry_price * (Decimal::ONE + (current_peak - dec!(5)) / dec!(100));
+            if drawdown_from_peak >= dec!(6) {
+                let trail_price = position.entry_price * (Decimal::ONE + (current_peak - dec!(6)) / dec!(100));
                 debug!("[{}] Trailing stop triggered: peak={:.2}%, current low PnL={:.2}%, trail price={:.2}",
                     pair, current_peak, current_pnl_pct, trail_price);
                 return self.close_position_internal(&position, trail_price, candle.open_time, ExitReason::TrailingStop);

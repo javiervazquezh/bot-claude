@@ -31,14 +31,14 @@ impl MomentumStrategy {
         Self {
             name: format!("Momentum_{}", pair),
             pair,
-            rsi: RSI::new(14),
-            ema_fast: EMA::new(8),
-            ema_slow: EMA::new(21),
-            volume_profile: VolumeProfile::new(20),
-            atr: ATR::new(14),
+            rsi: RSI::new(21),
+            ema_fast: EMA::new(16),
+            ema_slow: EMA::new(42),
+            volume_profile: VolumeProfile::new(40),
+            atr: ATR::new(28),
             obv: OBV::new(),
             prev_obv: None,
-            stoch_rsi: StochasticRSI::new(14, 14, 3, 3),
+            stoch_rsi: StochasticRSI::new(21, 21, 5, 5),
             last_stoch_k: None,
             rsi_overbought: Decimal::from(70),
             rsi_oversold: Decimal::from(30),
@@ -102,6 +102,7 @@ impl Strategy for MomentumStrategy {
         if candles.len() < self.min_candles_required() {
             return None;
         }
+
 
         // Update indicators with NEW candles only (incremental)
         let len = candles.len();
@@ -195,13 +196,13 @@ impl Strategy for MomentumStrategy {
         let entry = current.close;
         let (stop_loss, take_profit) = match signal {
             Signal::StrongBuy | Signal::Buy => {
-                let sl = entry - (atr * Decimal::new(12, 1));
-                let tp = entry + (atr * Decimal::new(24, 1));
+                let sl = entry - (atr * Decimal::new(24, 1));
+                let tp = entry + (atr * Decimal::new(48, 1));
                 (sl, tp)
             }
             Signal::StrongSell | Signal::Sell => {
-                let sl = entry + (atr * Decimal::new(12, 1));
-                let tp = entry - (atr * Decimal::new(24, 1));
+                let sl = entry + (atr * Decimal::new(24, 1));
+                let tp = entry - (atr * Decimal::new(48, 1));
                 (sl, tp)
             }
             _ => (entry, entry),
@@ -228,7 +229,7 @@ impl Strategy for MomentumStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        30
+        60
     }
 
     fn reset(&mut self) {
@@ -262,9 +263,9 @@ impl VolumeBreakoutStrategy {
         Self {
             name: format!("VolumeBreakout_{}", pair),
             pair,
-            volume_profile: VolumeProfile::new(20),
-            atr: ATR::new(14),
-            lookback: 10,
+            volume_profile: VolumeProfile::new(40),
+            atr: ATR::new(28),
+            lookback: 20,
             volume_multiplier: Decimal::from(2),
             candles_processed: 0,
         }
@@ -348,13 +349,13 @@ impl Strategy for VolumeBreakoutStrategy {
         let entry = current.close;
         let (stop_loss, take_profit) = match signal {
             Signal::StrongBuy | Signal::Buy => {
-                let sl = current.low - (atr * Decimal::new(5, 1));
-                let tp = entry + (atr * Decimal::from(2));
+                let sl = current.low - (atr * Decimal::ONE);
+                let tp = entry + (atr * Decimal::from(4));
                 (sl, tp)
             }
             _ => {
-                let sl = current.high + (atr * Decimal::new(5, 1));
-                let tp = entry - (atr * Decimal::from(2));
+                let sl = current.high + (atr * Decimal::ONE);
+                let tp = entry - (atr * Decimal::from(4));
                 (sl, tp)
             }
         };
@@ -366,7 +367,7 @@ impl Strategy for VolumeBreakoutStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        25
+        50
     }
 
     fn reset(&mut self) {

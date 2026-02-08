@@ -92,11 +92,11 @@ impl ATR {
                 return VolatilityLevel::Low;
             };
 
-            if atr_pct > Decimal::from(5) {
+            if atr_pct > Decimal::new(25, 1) {
                 VolatilityLevel::Extreme
-            } else if atr_pct > Decimal::from(3) {
+            } else if atr_pct > Decimal::new(15, 1) {
                 VolatilityLevel::High
-            } else if atr_pct > Decimal::from(1) {
+            } else if atr_pct > Decimal::new(5, 1) {
                 VolatilityLevel::Medium
             } else {
                 VolatilityLevel::Low

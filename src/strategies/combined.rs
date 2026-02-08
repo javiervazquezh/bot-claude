@@ -40,12 +40,12 @@ impl CombinedStrategy {
         let pair = TradingPair::BTCUSDT;
         let strategies: Vec<Box<dyn Strategy>> = vec![
             Box::new(TrendStrategy::new(pair)),
-            Box::new(BreakoutStrategy::new(pair)),
+            Box::new(MomentumStrategy::new(pair)),
             Box::new(MeanReversionStrategy::new(pair)),
         ];
         let weights = vec![
             Decimal::new(45, 2), // 45% trend
-            Decimal::new(35, 2), // 35% breakout
+            Decimal::new(35, 2), // 35% momentum
             Decimal::new(20, 2), // 20% mean reversion
         ];
 
@@ -56,9 +56,9 @@ impl CombinedStrategy {
             base_weights: weights.clone(),
             weights,
             min_agreement: Decimal::new(60, 2),
-            layout: StrategyLayout { trend_idx: Some(0), momentum_idx: None, mean_reversion_idx: Some(2) },
-            atr: ATR::new(14),
-            macro_ema: EMA::new(200),
+            layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
+            atr: ATR::new(28),
+            macro_ema: EMA::new(400),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
         }
@@ -86,8 +86,8 @@ impl CombinedStrategy {
             weights,
             min_agreement: Decimal::new(55, 2),
             layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
-            atr: ATR::new(14),
-            macro_ema: EMA::new(200),
+            atr: ATR::new(28),
+            macro_ema: EMA::new(400),
             btc_correlation: Some(BTCCorrelationStrategy::new()),
             btc_correlation_weight: Decimal::new(15, 2), // 15%
         }
@@ -116,8 +116,8 @@ impl CombinedStrategy {
             weights,
             min_agreement: Decimal::new(65, 2),
             layout: StrategyLayout { trend_idx: None, momentum_idx: Some(0), mean_reversion_idx: Some(2) },
-            atr: ATR::new(14),
-            macro_ema: EMA::new(200),
+            atr: ATR::new(28),
+            macro_ema: EMA::new(400),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
         }
@@ -143,8 +143,8 @@ impl CombinedStrategy {
             weights,
             min_agreement: Decimal::new(55, 2),
             layout: StrategyLayout { trend_idx: Some(0), momentum_idx: Some(1), mean_reversion_idx: Some(2) },
-            atr: ATR::new(14),
-            macro_ema: EMA::new(200),
+            atr: ATR::new(28),
+            macro_ema: EMA::new(400),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
         }
@@ -303,13 +303,13 @@ impl CombinedStrategy {
         // StrongBuy lowered from 1.5 to 1.2 since max achievable is ~1.3 with 2 strategies
         let final_signal = if active_primary_count < min_active {
             Signal::Neutral
-        } else if avg_strength > Decimal::new(12, 1) {
+        } else if avg_strength > Decimal::new(14, 1) {
             Signal::StrongBuy
-        } else if avg_strength > Decimal::new(5, 1) {
+        } else if avg_strength > Decimal::new(7, 1) {
             Signal::Buy
-        } else if avg_strength < Decimal::new(-12, 1) {
+        } else if avg_strength < Decimal::new(-14, 1) {
             Signal::StrongSell
-        } else if avg_strength < Decimal::new(-5, 1) {
+        } else if avg_strength < Decimal::new(-7, 1) {
             Signal::Sell
         } else {
             Signal::Neutral
@@ -420,10 +420,10 @@ impl BTCCorrelationStrategy {
         Self {
             name: "BTCCorrelation_ETH".to_string(),
             pair: TradingPair::ETHUSDT,
-            btc_candles: CandleBuffer::new(100),
-            correlation_lookback: 20,
+            btc_candles: CandleBuffer::new(200),
+            correlation_lookback: 80,
             lag_periods: 2,
-            atr: crate::indicators::ATR::new(14),
+            atr: crate::indicators::ATR::new(28),
         }
     }
 
@@ -513,10 +513,10 @@ impl Strategy for BTCCorrelationStrategy {
             let entry = current.close;
             let (sl, tp) = match signal {
                 Signal::StrongBuy | Signal::Buy => {
-                    (entry - atr * Decimal::new(15, 1), entry + atr * Decimal::from(3))
+                    (entry - atr * Decimal::new(30, 1), entry + atr * Decimal::from(6))
                 }
                 Signal::StrongSell | Signal::Sell => {
-                    (entry + atr * Decimal::new(15, 1), entry - atr * Decimal::from(3))
+                    (entry + atr * Decimal::new(30, 1), entry - atr * Decimal::from(6))
                 }
                 _ => (entry, entry),
             };

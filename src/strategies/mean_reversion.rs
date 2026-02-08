@@ -24,10 +24,10 @@ impl MeanReversionStrategy {
         Self {
             name: format!("MeanReversion_{}", pair),
             pair,
-            bollinger: BollingerBands::default_params(),
-            rsi: RSI::new(14),
-            atr: ATR::new(14),
-            mfi: MoneyFlowIndex::new(14),
+            bollinger: BollingerBands::new(40, Decimal::from(2)),
+            rsi: RSI::new(21),
+            atr: ATR::new(28),
+            mfi: MoneyFlowIndex::new(28),
             rsi_oversold: Decimal::from(25),
             rsi_overbought: Decimal::from(75),
             candles_processed: 0,
@@ -38,10 +38,10 @@ impl MeanReversionStrategy {
         Self {
             name: format!("MeanReversion_Conservative_{}", pair),
             pair,
-            bollinger: BollingerBands::new(20, Decimal::new(25, 1)), // 2.5 std dev
-            rsi: RSI::new(14),
-            atr: ATR::new(14),
-            mfi: MoneyFlowIndex::new(14),
+            bollinger: BollingerBands::new(40, Decimal::new(25, 1)), // 2.5 std dev
+            rsi: RSI::new(21),
+            atr: ATR::new(28),
+            mfi: MoneyFlowIndex::new(28),
             rsi_oversold: Decimal::from(20),
             rsi_overbought: Decimal::from(80),
             candles_processed: 0,
@@ -136,7 +136,7 @@ impl Strategy for MeanReversionStrategy {
         }
         self.candles_processed = len;
 
-        if !self.bollinger.is_ready() || !self.rsi.is_ready() || !self.atr.is_ready() {
+        if !self.bollinger.is_ready() || !self.rsi.is_ready() || !self.atr.is_ready() || !self.mfi.is_ready() {
             return None;
         }
 
@@ -173,13 +173,13 @@ impl Strategy for MeanReversionStrategy {
         let entry = price;
         let (stop_loss, take_profit) = match signal {
             Signal::StrongBuy | Signal::Buy => {
-                let sl = bb_lower - (atr * Decimal::new(5, 1));
+                let sl = bb_lower - (atr * Decimal::ONE);
                 // Target midpoint between middle and upper band for better R:R
                 let tp = bb_middle + (bb_upper - bb_middle) * Decimal::new(5, 1);
                 (sl, tp)
             }
             Signal::StrongSell | Signal::Sell => {
-                let sl = bb_upper + (atr * Decimal::new(5, 1));
+                let sl = bb_upper + (atr * Decimal::ONE);
                 // Target midpoint between middle and lower band for better R:R
                 let tp = bb_middle - (bb_middle - bb_lower) * Decimal::new(5, 1);
                 (sl, tp)
@@ -199,7 +199,7 @@ impl Strategy for MeanReversionStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        30
+        60
     }
 
     fn reset(&mut self) {
@@ -228,9 +228,9 @@ impl RSIDivergenceStrategy {
         Self {
             name: format!("RSIDivergence_{}", pair),
             pair,
-            rsi: RSI::new(14),
-            atr: ATR::new(14),
-            lookback: 14,
+            rsi: RSI::new(21),
+            atr: ATR::new(28),
+            lookback: 48,
             price_history: Vec::with_capacity(20),
             candles_processed: 0,
         }
@@ -326,13 +326,13 @@ impl Strategy for RSIDivergenceStrategy {
         let entry = price;
         let (stop_loss, take_profit) = match signal {
             Signal::Buy => {
-                let sl = entry - (atr * Decimal::from(2));
-                let tp = entry + (atr * Decimal::from(3));
+                let sl = entry - (atr * Decimal::from(3));
+                let tp = entry + (atr * Decimal::from(6));
                 (sl, tp)
             }
             Signal::Sell => {
-                let sl = entry + (atr * Decimal::from(2));
-                let tp = entry - (atr * Decimal::from(3));
+                let sl = entry + (atr * Decimal::from(3));
+                let tp = entry - (atr * Decimal::from(6));
                 (sl, tp)
             }
             _ => (entry, entry),
@@ -345,7 +345,7 @@ impl Strategy for RSIDivergenceStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        30
+        60
     }
 
     fn reset(&mut self) {

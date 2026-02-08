@@ -25,13 +25,13 @@ impl TrendStrategy {
         Self {
             name: format!("Trend_{}", pair),
             pair,
-            ema: DoubleEMA::new(9, 21),
-            macd: MACD::default_params(),
-            atr: ATR::new(14),
+            ema: DoubleEMA::new(20, 50),
+            macd: MACD::new(24, 52, 18),
+            atr: ATR::new(28),
             vwap: VWAP::new(),
-            min_trend_strength: Decimal::new(5, 1), // 0.5% minimum spread
-            atr_multiplier_sl: Decimal::new(15, 1), // 1.5x ATR for stop loss
-            atr_multiplier_tp: Decimal::new(30, 1), // 3x ATR for take profit
+            min_trend_strength: Decimal::new(4, 1), // 0.4% minimum spread
+            atr_multiplier_sl: Decimal::new(30, 1), // 3x ATR for stop loss (2x for H1 smaller ATR)
+            atr_multiplier_tp: Decimal::new(60, 1), // 6x ATR for take profit (2x for H1 smaller ATR)
             candles_processed: 0,
         }
     }
@@ -46,12 +46,12 @@ impl TrendStrategy {
             name: format!("Trend_{}_{}/{}", pair, fast_ema, slow_ema),
             pair,
             ema: DoubleEMA::new(fast_ema, slow_ema),
-            macd: MACD::default_params(),
+            macd: MACD::new(24, 52, 18),
             atr: ATR::new(atr_period),
             vwap: VWAP::new(),
-            min_trend_strength: Decimal::new(5, 1),
-            atr_multiplier_sl: Decimal::new(15, 1),
-            atr_multiplier_tp: Decimal::new(30, 1),
+            min_trend_strength: Decimal::new(4, 1),
+            atr_multiplier_sl: Decimal::new(30, 1),
+            atr_multiplier_tp: Decimal::new(60, 1),
             candles_processed: 0,
         }
     }
@@ -175,6 +175,7 @@ impl Strategy for TrendStrategy {
             confidence = confidence.min(Decimal::new(95, 2));
         }
 
+
         // Calculate entry, stop loss, and take profit
         let entry = current_price;
         let (stop_loss, take_profit) = if is_bullish {
@@ -202,7 +203,7 @@ impl Strategy for TrendStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        50 // Need enough for slow EMA and MACD
+        80 // Need enough for slow EMA(50) and MACD(24,52,18)
     }
 
     fn reset(&mut self) {
@@ -230,9 +231,9 @@ impl BreakoutStrategy {
         Self {
             name: format!("Breakout_{}", pair),
             pair,
-            lookback_period: 20,
-            atr: ATR::new(14),
-            breakout_threshold: Decimal::new(15, 1), // 1.5x ATR
+            lookback_period: 48,
+            atr: ATR::new(28),
+            breakout_threshold: Decimal::new(20, 1), // 2x ATR for H1
             candles_processed: 0,
         }
     }
@@ -331,7 +332,7 @@ impl Strategy for BreakoutStrategy {
     }
 
     fn min_candles_required(&self) -> usize {
-        self.lookback_period + 14 + 1 // +1 for excluding current candle
+        self.lookback_period + 28 + 1 // +1 for excluding current candle
     }
 
     fn reset(&mut self) {

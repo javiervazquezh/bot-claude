@@ -229,11 +229,11 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
 
     // Connect to WebSocket for real-time data
     let mut ws = BinanceWebSocket::new();
-    ws.subscribe_all_pairs(TimeFrame::H4);
+    ws.subscribe_all_pairs(TimeFrame::H1);
     let mut event_rx = ws.connect().await?;
 
     info!("Connected to market data feed");
-    info!("Monitoring BTC, ETH, SOL on 4-hour timeframe");
+    info!("Monitoring BTC, ETH, SOL on 1-hour timeframe");
     info!("Press Ctrl+C to stop");
 
     // Update initial portfolio state
@@ -245,7 +245,7 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
 
     // Log startup
     dashboard.add_log("INFO".to_string(), "Bot initialized with historical candles - ready to trade!".to_string()).await;
-    dashboard.add_log("INFO".to_string(), format!("Monitoring {} pairs on 4-hour timeframe", strategies.len())).await;
+    dashboard.add_log("INFO".to_string(), format!("Monitoring {} pairs on 1-hour timeframe", strategies.len())).await;
 
     // Main trading loop
     let mut candle_count = 0u64;
@@ -394,7 +394,7 @@ async fn run_paper_trading(initial_capital: Decimal, dashboard_port: u16) -> Res
                                 update_dashboard_portfolio(&dashboard, &engine).await;
 
                                 // Periodic console summary and state persistence
-                                if candle_count % 12 == 0 {
+                                if candle_count % 48 == 0 {
                                     let summary = engine.portfolio_summary().await;
                                     println!("\n{}", summary);
 
@@ -623,8 +623,8 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         info!("=== Running Backtest and Saving to Database ===");
         info!("Period: {} to {}", start_date, end_date);
         info!("Pairs: BTC, ETH, SOL");
-        info!("Timeframe: 4-hour");
-        info!("Initial Capital: $2,000");
+        info!("Timeframe: 1-hour");
+        info!("Initial Capital: $10,000");
         info!("Strategy: Conservative (5% risk, 60% allocation)");
         info!("This will take several minutes to fetch and process data...");
         println!();
@@ -638,8 +638,8 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         let config = BacktestConfig {
             start_date,
             end_date,
-            initial_capital: Decimal::from(2000),
-            timeframe: TimeFrame::H4,
+            initial_capital: Decimal::from(10000),
+            timeframe: TimeFrame::H1,
             pairs: vec![
                 TradingPair::BTCUSDT,
                 TradingPair::ETHUSDT,
@@ -706,8 +706,8 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
     info!("=== Starting Comprehensive Backtest Comparison ===");
     info!("Period: {} to {}", start_date, end_date);
     info!("Pairs: BTC, ETH, SOL");
-    info!("Timeframe: 4-hour");
-    info!("Initial Capital: $2,000");
+    info!("Timeframe: 1-hour");
+    info!("Initial Capital: $10,000");
     info!("Running 3 scenarios: Conservative, Moderate, Aggressive");
     println!();
 
@@ -718,8 +718,8 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
     let conservative = BacktestConfig {
         start_date,
         end_date,
-        initial_capital: Decimal::from(2000),
-        timeframe: TimeFrame::H4,
+        initial_capital: Decimal::from(10000),
+        timeframe: TimeFrame::H1,
         pairs: vec![
             TradingPair::BTCUSDT,
             TradingPair::ETHUSDT,
@@ -750,8 +750,8 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
     let moderate = BacktestConfig {
         start_date,
         end_date,
-        initial_capital: Decimal::from(2000),
-        timeframe: TimeFrame::H4,
+        initial_capital: Decimal::from(10000),
+        timeframe: TimeFrame::H1,
         pairs: vec![
             TradingPair::BTCUSDT,
             TradingPair::ETHUSDT,
@@ -759,10 +759,10 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         ],
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.65),   // Moderate confidence bar
-        min_risk_reward: dec!(2.0),   // Standard R:R
-        risk_per_trade: dec!(0.05),   // 5% risk per trade
-        max_allocation: dec!(0.60),   // 60% max allocation per position
+        min_confidence: dec!(0.65),   // Same as H4 moderate
+        min_risk_reward: dec!(2.0),   // Same as H4
+        risk_per_trade: dec!(0.05),   // 5% risk per trade (same as H4)
+        max_allocation: dec!(0.60),   // 60% max allocation (same as H4)
         max_correlated_positions: 2,
         max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
@@ -782,8 +782,8 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
     let aggressive = BacktestConfig {
         start_date,
         end_date,
-        initial_capital: Decimal::from(2000),
-        timeframe: TimeFrame::H4,
+        initial_capital: Decimal::from(10000),
+        timeframe: TimeFrame::H1,
         pairs: vec![
             TradingPair::BTCUSDT,
             TradingPair::ETHUSDT,
@@ -842,14 +842,14 @@ async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize) -> 
     info!("Period: {} to {}", start_date, end_date);
     info!("Windows: {}", n_windows);
     info!("Pairs: BTC, ETH, SOL");
-    info!("Timeframe: 4-hour");
+    info!("Timeframe: 1-hour");
     println!();
 
     let config = BacktestConfig {
         start_date,
         end_date,
-        initial_capital: Decimal::from(2000),
-        timeframe: TimeFrame::H4,
+        initial_capital: Decimal::from(10000),
+        timeframe: TimeFrame::H1,
         pairs: vec![
             TradingPair::BTCUSDT,
             TradingPair::ETHUSDT,
