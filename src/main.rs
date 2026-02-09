@@ -75,6 +75,9 @@ enum Commands {
         /// Run walk-forward validation with N windows
         #[arg(long)]
         walk_forward: Option<usize>,
+        /// Path to trained HMM model JSON file
+        #[arg(long)]
+        hmm: Option<String>,
     },
     /// Show current market prices
     Prices,
@@ -86,6 +89,30 @@ enum Commands {
     },
     /// Show portfolio status
     Status,
+    /// Train HMM regime detector from historical data
+    TrainHmm {
+        /// Trading pair to train on (e.g., BTCUSDT, ETHUSDT, SOLUSDT)
+        #[arg(short, long, default_value = "BTCUSDT")]
+        pair: String,
+        /// Start date (YYYY-MM-DD)
+        #[arg(short, long)]
+        start: String,
+        /// End date (YYYY-MM-DD)
+        #[arg(short, long)]
+        end: String,
+        /// Timeframe (M5, M15, H1, H4, D1)
+        #[arg(short = 'f', long, default_value = "H1")]
+        timeframe: String,
+        /// Output directory for trained model (defaults to ~/.claude/models/)
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Number of EM iterations
+        #[arg(long, default_value = "50")]
+        n_iter: usize,
+        /// Convergence tolerance
+        #[arg(long, default_value = "0.0001")]
+        tolerance: f64,
+    },
 }
 
 #[tokio::main]
@@ -112,11 +139,11 @@ async fn main() -> Result<()> {
         Commands::Live => {
             error!("Live trading not yet implemented. Use paper trading mode first.");
         }
-        Commands::Backtest { start, end, save_to_db, walk_forward } => {
+        Commands::Backtest { start, end, save_to_db, walk_forward, hmm } => {
             if let Some(n_windows) = walk_forward {
-                run_walk_forward_backtest(&start, &end, n_windows).await?;
+                run_walk_forward_backtest(&start, &end, n_windows, hmm.as_deref()).await?;
             } else {
-                run_backtest(&start, &end, save_to_db).await?;
+                run_backtest(&start, &end, save_to_db, hmm.as_deref()).await?;
             }
         }
         Commands::Prices => {
@@ -127,6 +154,9 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             info!("Status command - no active session");
+        }
+        Commands::TrainHmm { pair, start, end, timeframe, output, n_iter, tolerance } => {
+            train_hmm_model(&pair, &start, &end, &timeframe, output.as_deref(), n_iter, tolerance).await?;
         }
     }
 
@@ -607,7 +637,7 @@ async fn analyze_market(pair_str: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
+async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option<&str>) -> Result<()> {
     // Parse dates
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
@@ -655,6 +685,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
             max_drawdown_pct: dec!(15),
             walk_forward_windows: None,
             walk_forward_oos_pct: dec!(0.25),
+            hmm_model_path: hmm_path.map(|s| s.to_string()),
         };
 
         let mut engine = BacktestEngine::new(config);
@@ -735,6 +766,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         max_drawdown_pct: dec!(10),   // Tight emergency stop
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
+        hmm_model_path: hmm_path.map(|s| s.to_string()),
     };
     let mut engine1 = BacktestEngine::new(conservative);
     let results1 = engine1.run().await?;
@@ -767,6 +799,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
+        hmm_model_path: hmm_path.map(|s| s.to_string()),
     };
     let mut engine2 = BacktestEngine::new(moderate);
     let results2 = engine2.run().await?;
@@ -799,6 +832,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
         max_drawdown_pct: dec!(20),   // Wider emergency stop
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
+        hmm_model_path: hmm_path.map(|s| s.to_string()),
     };
     let mut engine3 = BacktestEngine::new(aggressive);
     let results3 = engine3.run().await?;
@@ -824,7 +858,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize) -> Result<()> {
+async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize, hmm_path: Option<&str>) -> Result<()> {
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
     let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
@@ -865,10 +899,218 @@ async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize) -> 
         max_drawdown_pct: dec!(15),
         walk_forward_windows: Some(n_windows),
         walk_forward_oos_pct: dec!(0.25),
+        hmm_model_path: hmm_path.map(|s| s.to_string()),
     };
 
     let result = BacktestEngine::run_walk_forward(config, n_windows).await?;
     result.print_summary();
+
+    Ok(())
+}
+
+async fn train_hmm_model(
+    pair_str: &str,
+    start_str: &str,
+    end_str: &str,
+    timeframe_str: &str,
+    output_path: Option<&str>,
+    n_iter: usize,
+    tolerance: f64,
+) -> Result<()> {
+    use chrono::{NaiveDate, NaiveTime};
+    use ml::hmm::{GaussianHMM, extract_regime_features_batch};
+    use std::fs::File;
+    use std::io::Write;
+
+    info!("═══════════════════════════════════════════════════");
+    info!("HMM Regime Detector Training");
+    info!("═══════════════════════════════════════════════════");
+    info!("Pair: {}", pair_str);
+    info!("Period: {} to {}", start_str, end_str);
+    info!("Timeframe: {}", timeframe_str);
+    info!("EM iterations: {}", n_iter);
+    info!("Tolerance: {}", tolerance);
+
+    // Parse inputs
+    let pair = match pair_str.to_uppercase().as_str() {
+        "BTCUSDT" | "BTC" => TradingPair::BTCUSDT,
+        "ETHUSDT" | "ETH" => TradingPair::ETHUSDT,
+        "SOLUSDT" | "SOL" => TradingPair::SOLUSDT,
+        "BNBUSDT" | "BNB" => TradingPair::BNBUSDT,
+        "ADAUSDT" | "ADA" => TradingPair::ADAUSDT,
+        "XRPUSDT" | "XRP" => TradingPair::XRPUSDT,
+        _ => return Err(anyhow::anyhow!("Unknown trading pair: {}", pair_str)),
+    };
+
+    let timeframe = match timeframe_str.to_uppercase().as_str() {
+        "M5" | "5M" => TimeFrame::M5,
+        "M15" | "15M" => TimeFrame::M15,
+        "H1" | "1H" => TimeFrame::H1,
+        "H4" | "4H" => TimeFrame::H4,
+        "D1" | "1D" => TimeFrame::D1,
+        _ => return Err(anyhow::anyhow!("Unknown timeframe: {}", timeframe_str)),
+    };
+
+    let start_date = NaiveDate::parse_from_str(start_str, "%Y-%m-%d")?;
+    let end_date = NaiveDate::parse_from_str(end_str, "%Y-%m-%d")?;
+
+    let start = start_date
+        .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+        .and_utc();
+    let end = end_date
+        .and_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap())
+        .and_utc();
+
+    // Step 1: Fetch historical data
+    info!("━━━ Step 1: Fetching historical data ━━━");
+    let exchange = BinanceClient::public_only();
+    let candles = exchange
+        .get_historical_candles(pair, timeframe, start, end)
+        .await?;
+    info!("✓ Fetched {} candles", candles.len());
+
+    if candles.len() < 100 {
+        return Err(anyhow::anyhow!(
+            "Not enough data for training (need at least 100 candles, got {})",
+            candles.len()
+        ));
+    }
+
+    // Step 2: Extract regime features
+    info!("━━━ Step 2: Extracting regime features ━━━");
+    let mut candle_buffer = CandleBuffer::new(candles.len());
+    for candle in &candles {
+        candle_buffer.push(candle.clone());
+    }
+
+    // Extract features with a reasonable window size (500 is just for the check, actual sliding window is 30)
+    let features = extract_regime_features_batch(&candle_buffer, 500)?;
+    let (n_obs, n_features) = features.dim();
+    info!("✓ Extracted {} observations with {} features", n_obs, n_features);
+    info!("  Features: log returns, volatility, volume ratio, RSI, EMA spread, MACD, price momentum, volume momentum");
+
+    if n_obs < 30 {
+        return Err(anyhow::anyhow!(
+            "Not enough observations for training (need at least 30, got {})",
+            n_obs
+        ));
+    }
+
+    // Step 3: Initialize and train HMM
+    info!("━━━ Step 3: Training 3-state Gaussian HMM ━━━");
+    let mut hmm = GaussianHMM::new(n_features);
+
+    // Initialize with K-means clustering
+    info!("  Initializing with K-means clustering...");
+    hmm.init_with_kmeans(&features)?;
+
+    // Train with Baum-Welch EM algorithm
+    info!("  Training with Baum-Welch EM algorithm...");
+    info!("  (This may take a few minutes for large datasets)");
+
+    let start_time = std::time::Instant::now();
+    let (final_log_likelihood, converged_at) = hmm.fit(&features, n_iter, tolerance)?;
+    let training_time = start_time.elapsed();
+
+    info!("✓ Training complete in {:.1}s", training_time.as_secs_f64());
+    info!("  Final log-likelihood: {:.2}", final_log_likelihood);
+    info!("  Converged at iteration: {}", converged_at);
+
+    // Step 4: Validate model by predicting states
+    info!("━━━ Step 4: Validating trained model ━━━");
+    let predicted_states = hmm.predict(&features)?;
+
+    // Count state distribution
+    let mut state_counts = [0usize; 3];
+    for &state in &predicted_states {
+        if state < 3 {
+            state_counts[state] += 1;
+        }
+    }
+
+    let total = predicted_states.len() as f64;
+    info!("  State distribution:");
+    info!("    Bull (State 0):    {:6} candles ({:5.1}%)", state_counts[0], state_counts[0] as f64 / total * 100.0);
+    info!("    Bear (State 1):    {:6} candles ({:5.1}%)", state_counts[1], state_counts[1] as f64 / total * 100.0);
+    info!("    Neutral (State 2): {:6} candles ({:5.1}%)", state_counts[2], state_counts[2] as f64 / total * 100.0);
+
+    // Check for degenerate model (one state dominates >95%)
+    let max_state_pct = *state_counts.iter().max().unwrap_or(&0) as f64 / total * 100.0;
+    if max_state_pct > 95.0 {
+        warn!("⚠ Warning: Model may be degenerate (one state covers {:.1}% of data)", max_state_pct);
+        warn!("  Consider using more training data or different initialization");
+    }
+
+    // Step 5: Save trained model
+    info!("━━━ Step 5: Saving trained model ━━━");
+
+    let output_dir = match output_path {
+        Some(path) => path.to_string(),
+        None => {
+            let home = std::env::var("HOME")?;
+            format!("{}/.claude/models", home)
+        }
+    };
+
+    std::fs::create_dir_all(&output_dir)?;
+
+    // Save model to JSON file
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("hmm_{}_{}_{}_{}.json",
+        pair_str.to_lowercase(),
+        timeframe_str.to_lowercase(),
+        start_str.replace("-", ""),
+        timestamp
+    );
+    let model_path = std::path::Path::new(&output_dir).join(&filename);
+
+    // Serialize HMM to JSON
+    let model_json = serde_json::json!({
+        "model_type": "HMM",
+        "n_states": 3,
+        "n_features": n_features,
+        "transition": hmm.transition.as_slice().unwrap().to_vec(),
+        "start_prob": hmm.start_prob.to_vec(),
+        "means": hmm.means.as_slice().unwrap().to_vec(),
+        "means_shape": [3, n_features],
+        "training_metadata": {
+            "pair": format!("{:?}", pair),
+            "timeframe": format!("{:?}", timeframe),
+            "start_date": start_str,
+            "end_date": end_str,
+            "n_observations": n_obs,
+            "n_candles": candles.len(),
+            "final_log_likelihood": final_log_likelihood,
+            "em_iterations": converged_at,
+            "state_distribution": {
+                "bull_pct": format!("{:.1}", state_counts[0] as f64 / total * 100.0),
+                "bear_pct": format!("{:.1}", state_counts[1] as f64 / total * 100.0),
+                "neutral_pct": format!("{:.1}", state_counts[2] as f64 / total * 100.0),
+            }
+        }
+    });
+
+    let mut file = File::create(&model_path)?;
+    file.write_all(serde_json::to_string_pretty(&model_json)?.as_bytes())?;
+
+    let model_path_str = model_path.to_string_lossy();
+    info!("✓ Model saved to: {}", model_path_str);
+
+    // Print summary
+    info!("═══════════════════════════════════════════════════");
+    info!("Training Summary:");
+    info!("  Training data: {} candles from {} to {}", candles.len(), start_str, end_str);
+    info!("  Observations: {} (after feature extraction)", n_obs);
+    info!("  Final log-likelihood: {:.2}", final_log_likelihood);
+    info!("  Model file: {}", model_path_str);
+    info!("═══════════════════════════════════════════════════");
+    info!("✓ HMM training complete!");
+    info!("");
+    info!("To use this model in your strategy:");
+    info!("  1. Load the saved JSON and reconstruct the HMM");
+    info!("  2. Create detector: let detector = RegimeDetector::new(8);");
+    info!("  3. Load model: detector.load_model(hmm).await;");
+    info!("  4. Enable in strategy: strategy.with_regime_detector(Arc::new(RwLock::new(detector)))");
 
     Ok(())
 }

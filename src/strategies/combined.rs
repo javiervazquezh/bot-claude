@@ -1,7 +1,11 @@
 use rust_decimal::Decimal;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use crate::indicators::Indicator;
 use crate::indicators::atr::{ATR, VolatilityLevel};
 use crate::indicators::ema::EMA;
+use crate::ml::hmm::RegimeDetector;
+use crate::ml::RegimeState;
 use crate::types::{Candle, CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
 use super::trend::{TrendStrategy, BreakoutStrategy};
@@ -30,9 +34,12 @@ pub struct CombinedStrategy {
     min_agreement: Decimal,
     layout: StrategyLayout,
     atr: ATR,
-    macro_ema: EMA,  // 200-period EMA for macro trend filter
+    macro_ema: EMA,  // 400-period EMA for macro trend filter (H1 equivalent of H4 200-EMA)
     btc_correlation: Option<BTCCorrelationStrategy>,
     btc_correlation_weight: Decimal,
+    regime_detector: Option<Arc<RegimeDetector>>,
+    candles_since_regime_update: usize,
+    regime_update_interval: usize, // Update regime every N candles (4 for stability)
 }
 
 impl CombinedStrategy {
@@ -61,6 +68,9 @@ impl CombinedStrategy {
             macro_ema: EMA::new(400),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
+            regime_detector: None,
+            candles_since_regime_update: 0,
+            regime_update_interval: 4,
         }
     }
 
@@ -90,6 +100,9 @@ impl CombinedStrategy {
             macro_ema: EMA::new(400),
             btc_correlation: Some(BTCCorrelationStrategy::new()),
             btc_correlation_weight: Decimal::new(15, 2), // 15%
+            regime_detector: None,
+            candles_since_regime_update: 0,
+            regime_update_interval: 4,
         }
     }
 
@@ -120,6 +133,9 @@ impl CombinedStrategy {
             macro_ema: EMA::new(400),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
+            regime_detector: None,
+            candles_since_regime_update: 0,
+            regime_update_interval: 4,
         }
     }
 
@@ -147,19 +163,109 @@ impl CombinedStrategy {
             macro_ema: EMA::new(400),
             btc_correlation: None,
             btc_correlation_weight: Decimal::ZERO,
+            regime_detector: None,
+            candles_since_regime_update: 0,
+            regime_update_interval: 4,
         }
     }
 
-    /// Update regime detection and adjust strategy weights based on volatility
-    fn update_regime(&mut self, candle: &Candle) {
+    /// Enable HMM regime detection for this strategy
+    pub fn with_regime_detector(mut self, detector: Arc<RegimeDetector>) -> Self {
+        self.regime_detector = Some(detector);
+        self
+    }
+
+    /// Update regime detection and adjust strategy weights based on market regime
+    /// Uses HMM if available, otherwise falls back to ATR-based volatility detection
+    fn update_regime(&mut self, candle: &Candle, candles: &CandleBuffer) {
+        // Always update ATR (used as fallback and for other purposes)
         self.atr.update(candle.high, candle.low, candle.close);
 
+        self.candles_since_regime_update += 1;
+        if self.candles_since_regime_update < self.regime_update_interval {
+            return; // Only update weights every N candles for stability
+        }
+        self.candles_since_regime_update = 0;
+
+        // Try HMM regime detection first (synchronous, fast)
+        let hmm_regime = if let Some(detector) = &self.regime_detector {
+            detector.detect_regime_confident(candles).ok().flatten()
+        } else {
+            None
+        };
+
+        if let Some(regime) = hmm_regime {
+            self.apply_hmm_regime_weights(regime);
+            return;
+        }
+
+        // Fallback to ATR-based volatility detection
         let vol_level = match self.atr.volatility_level(candle.close) {
             Some(v) => v,
             None => return, // ATR not ready yet, keep base weights
         };
+        self.apply_atr_regime_weights(vol_level);
+    }
 
-        // Adjust weights based on regime
+    /// Apply HMM-based regime weight adjustments
+    fn apply_hmm_regime_weights(&mut self, regime: RegimeState) {
+        let mut adjusted = self.base_weights.clone();
+
+        match regime {
+            RegimeState::Bull => {
+                // Bull market: boost trend (+20%), boost momentum (+15%), reduce mean reversion (-10%)
+                if let Some(t_idx) = self.layout.trend_idx {
+                    if let Some(w) = adjusted.get_mut(t_idx) {
+                        *w += Decimal::new(20, 2);
+                    }
+                }
+                if let Some(m_idx) = self.layout.momentum_idx {
+                    if let Some(w) = adjusted.get_mut(m_idx) {
+                        *w += Decimal::new(15, 2);
+                    }
+                }
+                if let Some(mr_idx) = self.layout.mean_reversion_idx {
+                    if let Some(w) = adjusted.get_mut(mr_idx) {
+                        *w -= Decimal::new(10, 2);
+                    }
+                }
+            }
+            RegimeState::Bear => {
+                // Bear market: boost mean reversion (+20%), reduce momentum (-15%)
+                if let Some(mr_idx) = self.layout.mean_reversion_idx {
+                    if let Some(w) = adjusted.get_mut(mr_idx) {
+                        *w += Decimal::new(20, 2);
+                    }
+                }
+                if let Some(m_idx) = self.layout.momentum_idx {
+                    if let Some(w) = adjusted.get_mut(m_idx) {
+                        *w -= Decimal::new(15, 2);
+                    }
+                }
+            }
+            RegimeState::Neutral => {
+                // Neutral market: use balanced (base) weights - no adjustment
+            }
+        }
+
+        // Ensure no weight goes negative, then re-normalize to sum to 1.0
+        for w in adjusted.iter_mut() {
+            if *w < Decimal::ZERO {
+                *w = Decimal::ZERO;
+            }
+        }
+        let sum: Decimal = adjusted.iter().copied().sum();
+        if sum > Decimal::ZERO {
+            for w in adjusted.iter_mut() {
+                *w = *w / sum;
+            }
+        }
+
+        self.weights = adjusted;
+    }
+
+    /// Apply ATR-based volatility regime weight adjustments (fallback)
+    fn apply_atr_regime_weights(&mut self, vol_level: VolatilityLevel) {
         let mut adjusted = self.base_weights.clone();
         let shift = Decimal::new(15, 2); // 15% weight shift
 
@@ -345,7 +451,7 @@ impl Strategy for CombinedStrategy {
     fn analyze(&mut self, candles: &CandleBuffer) -> Option<StrategySignal> {
         // Update regime detection and macro trend from latest candle
         if let Some(latest) = candles.last() {
-            self.update_regime(latest);
+            self.update_regime(latest, candles);
             self.macro_ema.update(latest.close);
         }
 
@@ -363,13 +469,13 @@ impl Strategy for CombinedStrategy {
 
         let mut result = self.aggregate_signals(&signals, btc_signal.as_ref())?;
 
-        // Macro trend filter: suppress long entries when price is below 200-EMA
+        // Macro trend filter: suppress long entries when price is below 400-EMA
         // A long-only bot should not buy in confirmed downtrends
         if let Some(macro_val) = self.macro_ema.value() {
             if let Some(latest) = candles.last() {
                 if latest.close < macro_val && matches!(result.signal, Signal::Buy | Signal::StrongBuy) {
                     result.signal = Signal::Neutral;
-                    result.reason = format!("FILTERED (below 200-EMA): {}", result.reason);
+                    result.reason = format!("FILTERED (below 400-EMA): {}", result.reason);
                 }
             }
         }
@@ -395,12 +501,17 @@ impl Strategy for CombinedStrategy {
         self.weights = self.base_weights.clone();
         self.atr.reset();
         self.macro_ema.reset();
+        self.candles_since_regime_update = 0;
     }
 
     fn update_btc_candle(&mut self, candle: Candle) {
         if let Some(btc) = &mut self.btc_correlation {
             btc.update_btc(candle);
         }
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -545,5 +656,26 @@ pub fn create_strategies_for_pair(pair: TradingPair) -> CombinedStrategy {
         TradingPair::BNBUSDT => CombinedStrategy::for_altcoin(pair),
         TradingPair::ADAUSDT => CombinedStrategy::for_altcoin(pair),
         TradingPair::XRPUSDT => CombinedStrategy::for_altcoin(pair),
+    }
+}
+
+/// Strategy Factory with optional HMM regime detector
+pub fn create_strategies_for_pair_with_hmm(
+    pair: TradingPair,
+    hmm_detector: Option<std::sync::Arc<crate::ml::hmm::RegimeDetector>>,
+) -> CombinedStrategy {
+    let strategy = match pair {
+        TradingPair::BTCUSDT => CombinedStrategy::for_btc(),
+        TradingPair::ETHUSDT => CombinedStrategy::for_eth(),
+        TradingPair::SOLUSDT => CombinedStrategy::for_sol(),
+        TradingPair::BNBUSDT => CombinedStrategy::for_altcoin(pair),
+        TradingPair::ADAUSDT => CombinedStrategy::for_altcoin(pair),
+        TradingPair::XRPUSDT => CombinedStrategy::for_altcoin(pair),
+    };
+
+    if let Some(detector) = hmm_detector {
+        strategy.with_regime_detector(detector)
+    } else {
+        strategy
     }
 }

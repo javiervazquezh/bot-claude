@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::strategies::StrategySignal;
 use crate::types::{CandleBuffer, Signal, TradingPair};
+use crate::exchange::orderbook::{OrderBookManager, OrderBookFeatures};
 
 /// Fixed-size feature vector for ML prediction
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,10 +24,19 @@ pub struct TradeFeatures {
     pub hour_of_day: f64,
     pub day_of_week: f64,
     pub pair_id: f64,
+    // Order book features (Phase 1)
+    pub ob_spread_pct: f64,
+    pub ob_depth_imbalance: f64,
+    pub ob_mid_price_momentum: f64,
+    pub ob_spread_volatility: f64,
+    pub ob_book_pressure: f64,
+    pub ob_weighted_spread: f64,
+    pub ob_best_volume_ratio: f64,
+    pub ob_depth_ratio: f64,
 }
 
 impl TradeFeatures {
-    pub const NUM_FEATURES: usize = 16;
+    pub const NUM_FEATURES: usize = 24;
 
     pub fn to_array(&self) -> [f64; Self::NUM_FEATURES] {
         [
@@ -46,6 +56,14 @@ impl TradeFeatures {
             self.hour_of_day,
             self.day_of_week,
             self.pair_id,
+            self.ob_spread_pct,
+            self.ob_depth_imbalance,
+            self.ob_mid_price_momentum,
+            self.ob_spread_volatility,
+            self.ob_book_pressure,
+            self.ob_weighted_spread,
+            self.ob_best_volume_ratio,
+            self.ob_depth_ratio,
         ]
     }
 
@@ -74,6 +92,7 @@ pub fn extract_features(
     candles: &CandleBuffer,
     recent_trades: &[RecentTrade],
     macro_ema_value: Option<Decimal>,
+    orderbook_manager: Option<&OrderBookManager>,
 ) -> Option<TradeFeatures> {
     let current = candles.last()?;
     let price: f64 = current.close.try_into().ok()?;
@@ -121,6 +140,26 @@ pub fn extract_features(
     let hour_of_day = current.open_time.hour() as f64;
     let day_of_week = current.open_time.weekday().num_days_from_monday() as f64;
 
+    // Order book features (default to neutral values if not available)
+    let (ob_spread_pct, ob_depth_imbalance, ob_mid_price_momentum, ob_spread_volatility,
+         ob_book_pressure, ob_weighted_spread, ob_best_volume_ratio, ob_depth_ratio) =
+        orderbook_manager
+            .and_then(|mgr| OrderBookFeatures::extract(mgr, signal.pair))
+            .map(|features| {
+                let to_f64 = |d: Decimal| d.try_into().unwrap_or(0.0);
+                (
+                    to_f64(features.spread_pct),
+                    to_f64(features.depth_imbalance),
+                    to_f64(features.mid_price_momentum),
+                    to_f64(features.spread_volatility),
+                    to_f64(features.book_pressure),
+                    to_f64(features.weighted_spread),
+                    to_f64(features.best_volume_ratio),
+                    to_f64(features.depth_ratio),
+                )
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0));
+
     Some(TradeFeatures {
         signal_strength,
         confidence,
@@ -138,6 +177,14 @@ pub fn extract_features(
         hour_of_day,
         day_of_week,
         pair_id: TradeFeatures::pair_to_id(signal.pair),
+        ob_spread_pct,
+        ob_depth_imbalance,
+        ob_mid_price_momentum,
+        ob_spread_volatility,
+        ob_book_pressure,
+        ob_weighted_spread,
+        ob_best_volume_ratio,
+        ob_depth_ratio,
     })
 }
 

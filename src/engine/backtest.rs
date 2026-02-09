@@ -34,6 +34,7 @@ pub struct BacktestConfig {
     pub max_drawdown_pct: Decimal,           // Emergency stop drawdown threshold
     pub walk_forward_windows: Option<usize>, // None = standard backtest, Some(n) = n windows
     pub walk_forward_oos_pct: Decimal,       // Out-of-sample percentage (default 0.25)
+    pub hmm_model_path: Option<String>,      // Optional path to trained HMM model JSON
 }
 
 impl Default for BacktestConfig {
@@ -54,6 +55,7 @@ impl Default for BacktestConfig {
             max_drawdown_pct: dec!(15),  // Emergency stop at 15% drawdown
             walk_forward_windows: None,  // Standard backtest by default
             walk_forward_oos_pct: dec!(0.25), // 25% out-of-sample
+            hmm_model_path: None,        // No HMM by default
         }
     }
 }
@@ -118,8 +120,40 @@ impl BacktestEngine {
         let mut current_prices = HashMap::new();
 
         let mut atr_indicators = HashMap::new();
+
+        // Load HMM detector once if path provided
+        let hmm_detector = if let Some(hmm_path) = &config.hmm_model_path {
+            match crate::ml::hmm::RegimeDetector::from_json(hmm_path) {
+                Ok(detector) => {
+                    use std::sync::Arc;
+                    info!("HMM regime detector loaded from {}", hmm_path);
+                    Some(Arc::new(detector))
+                }
+                Err(e) => {
+                    warn!("Failed to load HMM model from {}: {}", hmm_path, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Create strategies - use HMM factory if detector loaded, otherwise use provided factory
         for pair in &config.pairs {
-            strategies.insert(*pair, factory(*pair));
+            let strategy = if hmm_detector.is_some() {
+                // Use HMM-aware factory
+                Box::new(crate::strategies::combined::create_strategies_for_pair_with_hmm(
+                    *pair,
+                    hmm_detector.clone(),
+                ))
+            } else {
+                // Use provided factory (legacy path)
+                factory(*pair)
+            };
+            strategies.insert(*pair, strategy);
+        }
+
+        for pair in &config.pairs {
             candle_buffers.insert(*pair, CandleBuffer::new(500));
             current_prices.insert(*pair, Decimal::ZERO);
             atr_indicators.insert(*pair, crate::indicators::atr::ATR::new(28));
@@ -513,7 +547,7 @@ impl BacktestEngine {
         if side == Some(Side::Buy) && !has_position {
             if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
                 let recent = self.outcome_tracker.recent_trades(10);
-                let feats = features::extract_features(&signal, buffer, &recent, None);
+                let feats = features::extract_features(&signal, buffer, &recent, None, None);
                 if let Some(ref f) = feats {
                     if !self.trade_predictor.should_trade(f) {
                         debug!("ML model rejected signal for {}", signal.pair);
@@ -529,7 +563,7 @@ impl BacktestEngine {
                 // Record ML features for this trade
                 if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
                     let recent = self.outcome_tracker.recent_trades(10);
-                    if let Some(feats) = features::extract_features(&signal, buffer, &recent, None) {
+                    if let Some(feats) = features::extract_features(&signal, buffer, &recent, None, None) {
                         let trade_id = format!("{}_{}", signal.pair, self.candles_processed);
                         self.outcome_tracker.record_entry(&trade_id, feats);
                         self.ml_trade_ids.insert(signal.pair, trade_id);
