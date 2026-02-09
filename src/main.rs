@@ -951,15 +951,18 @@ async fn export_training_data(start: &str, end: &str, output: &str) -> Result<()
             TradingPair::BTCUSDT,
             TradingPair::ETHUSDT,
             TradingPair::SOLUSDT,
+            TradingPair::BNBUSDT,
+            TradingPair::ADAUSDT,
+            TradingPair::XRPUSDT,
         ],
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.55),
-        min_risk_reward: dec!(1.5),
+        min_confidence: dec!(0.40),
+        min_risk_reward: dec!(1.0),
         risk_per_trade: dec!(0.12),
-        max_allocation: dec!(0.90),
-        max_correlated_positions: 3,
-        max_drawdown_pct: dec!(25),
+        max_allocation: dec!(0.95),
+        max_correlated_positions: 6,
+        max_drawdown_pct: dec!(30),
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: None,
@@ -981,7 +984,7 @@ async fn export_training_data(start: &str, end: &str, output: &str) -> Result<()
     use std::io::Write;
 
     // Header
-    writeln!(file, "signal_strength,confidence,risk_reward_ratio,rsi_14,atr_pct,ema_spread_pct,bb_position,price_vs_200ema,volume_ratio,volatility_regime,recent_win_rate,recent_avg_pnl_pct,streak,hour_of_day,day_of_week,pair_id,ob_spread_pct,ob_depth_imbalance,ob_mid_price_momentum,ob_spread_volatility,ob_book_pressure,ob_weighted_spread,ob_best_volume_ratio,ob_depth_ratio,win,pnl_pct")?;
+    writeln!(file, "signal_strength,confidence,rsi_14,atr_pct,ema_spread_pct,bb_position,volume_ratio,volatility_regime,recent_win_rate,recent_avg_pnl_pct,streak,hour_of_day,day_of_week,pair_id,macd_line,macd_histogram,stochastic_rsi_k,mfi_14,roc_10,bb_width_pct,atr_normalized_return,win,pnl_pct")?;
 
     // Data rows
     for (features, is_win, pnl_pct) in &training_data {

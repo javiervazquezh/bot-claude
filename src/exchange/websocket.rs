@@ -9,6 +9,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use crate::types::{Candle, Side, Ticker, TimeFrame, Trade, TradingPair};
+use super::orderbook::{OrderBookSnapshot, OrderBookLevel};
 
 const BINANCE_US_WS: &str = "wss://stream.binance.us:9443/ws";
 const BINANCE_US_STREAM: &str = "wss://stream.binance.us:9443/stream";
@@ -19,6 +20,7 @@ pub enum MarketEvent {
     Candle(Candle),
     Trade(Trade),
     BookTicker(BookTicker),
+    OrderBook(OrderBookSnapshot),
     Disconnected,
     Error(String),
 }
@@ -69,10 +71,17 @@ impl BinanceWebSocket {
         self
     }
 
+    pub fn subscribe_depth(&mut self, pair: TradingPair, levels: u8) -> &mut Self {
+        let stream = format!("{}@depth{}@100ms", pair.as_str().to_lowercase(), levels);
+        self.streams.push(stream);
+        self
+    }
+
     pub fn subscribe_all_pairs(&mut self, timeframe: TimeFrame) -> &mut Self {
         for pair in TradingPair::all() {
             self.subscribe_kline(pair, timeframe);
             self.subscribe_book_ticker(pair);
+            self.subscribe_depth(pair, 10);
         }
         self
     }
@@ -212,6 +221,10 @@ impl BinanceWebSocket {
             return Self::parse_book_ticker(&book);
         }
 
+        if let Ok(depth) = serde_json::from_str::<WsDepthMessage>(text) {
+            return Self::parse_depth(&depth);
+        }
+
         debug!("Unknown message type: {}", text);
         None
     }
@@ -235,6 +248,11 @@ impl BinanceWebSocket {
         if stream.contains("@bookTicker") {
             let book: WsBookTickerMessage = serde_json::from_value(data.clone()).ok()?;
             return Self::parse_book_ticker(&book);
+        }
+
+        if stream.contains("@depth") {
+            let depth: WsDepthMessage = serde_json::from_value(data.clone()).ok()?;
+            return Self::parse_depth(&depth);
         }
 
         None
@@ -305,6 +323,43 @@ impl BinanceWebSocket {
             bid_qty: Decimal::from_str(&msg.bid_qty).ok()?,
             ask_price: Decimal::from_str(&msg.ask_price).ok()?,
             ask_qty: Decimal::from_str(&msg.ask_qty).ok()?,
+        }))
+    }
+
+    fn parse_depth(msg: &WsDepthMessage) -> Option<MarketEvent> {
+        let pair = TradingPair::from_str(&msg.symbol)?;
+
+        let bids: Vec<OrderBookLevel> = msg.bids.iter()
+            .filter_map(|level| {
+                if level.len() >= 2 {
+                    Some(OrderBookLevel {
+                        price: Decimal::from_str(&level[0]).ok()?,
+                        quantity: Decimal::from_str(&level[1]).ok()?,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let asks: Vec<OrderBookLevel> = msg.asks.iter()
+            .filter_map(|level| {
+                if level.len() >= 2 {
+                    Some(OrderBookLevel {
+                        price: Decimal::from_str(&level[0]).ok()?,
+                        quantity: Decimal::from_str(&level[1]).ok()?,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Some(MarketEvent::OrderBook(OrderBookSnapshot {
+            pair,
+            timestamp: Utc::now(),
+            bids,
+            asks,
         }))
     }
 }
@@ -412,4 +467,14 @@ struct WsBookTickerMessage {
     ask_price: String,
     #[serde(rename = "A")]
     ask_qty: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WsDepthMessage {
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "bids")]
+    bids: Vec<Vec<String>>,
+    #[serde(rename = "asks")]
+    asks: Vec<Vec<String>>,
 }

@@ -31,12 +31,10 @@ from skl2onnx import convert_sklearn
 FEATURE_COLUMNS = [
     "signal_strength",
     "confidence",
-    "risk_reward_ratio",
     "rsi_14",
     "atr_pct",
     "ema_spread_pct",
     "bb_position",
-    "price_vs_200ema",
     "volume_ratio",
     "volatility_regime",
     "recent_win_rate",
@@ -45,14 +43,13 @@ FEATURE_COLUMNS = [
     "hour_of_day",
     "day_of_week",
     "pair_id",
-    "ob_spread_pct",
-    "ob_depth_imbalance",
-    "ob_mid_price_momentum",
-    "ob_spread_volatility",
-    "ob_book_pressure",
-    "ob_weighted_spread",
-    "ob_best_volume_ratio",
-    "ob_depth_ratio",
+    "macd_line",
+    "macd_histogram",
+    "stochastic_rsi_k",
+    "mfi_14",
+    "roc_10",
+    "bb_width_pct",
+    "atr_normalized_return",
 ]
 
 TARGET_COLUMN = "win"
@@ -62,8 +59,21 @@ def load_data(path: str) -> pd.DataFrame:
     """Load training data CSV exported from Rust backtest."""
     df = pd.read_csv(path)
     print(f"Loaded {len(df)} trades from {path}")
-    print(f"  Wins:   {df[TARGET_COLUMN].sum()} ({df[TARGET_COLUMN].mean()*100:.1f}%)")
-    print(f"  Losses: {(1 - df[TARGET_COLUMN]).sum()} ({(1 - df[TARGET_COLUMN]).mean()*100:.1f}%)")
+    print(f"  Wins:   {int(df[TARGET_COLUMN].sum())} ({df[TARGET_COLUMN].mean()*100:.1f}%)")
+    print(f"  Losses: {int((1 - df[TARGET_COLUMN]).sum())} ({(1 - df[TARGET_COLUMN]).mean()*100:.1f}%)")
+
+    # Feature correlation with target
+    print(f"\n=== Feature Correlation with Win ===")
+    correlations = df[FEATURE_COLUMNS].corrwith(df[TARGET_COLUMN]).sort_values(key=abs, ascending=False)
+    for feat, corr in correlations.items():
+        marker = " ***" if abs(corr) > 0.10 else ""
+        print(f"  {feat:30s} {corr:+.4f}{marker}")
+
+    # Warn about constant features
+    const_feats = [f for f in FEATURE_COLUMNS if df[f].nunique() <= 1]
+    if const_feats:
+        print(f"\n  WARNING: Constant features (no variance): {const_feats}")
+
     return df
 
 
@@ -117,6 +127,12 @@ def train_xgboost(X_train, y_train, X_test, y_test):
     """Train XGBoost classifier with regularization."""
     print("\n=== Training XGBoost ===")
 
+    # Compute class imbalance weight
+    n_neg = (y_train == 0).sum()
+    n_pos = (y_train == 1).sum()
+    scale_weight = n_neg / n_pos if n_pos > 0 else 1.0
+    print(f"  scale_pos_weight: {scale_weight:.2f} ({n_pos} wins, {n_neg} losses)")
+
     model = xgb.XGBClassifier(
         max_depth=4,
         n_estimators=100,
@@ -126,6 +142,7 @@ def train_xgboost(X_train, y_train, X_test, y_test):
         min_child_weight=5,
         subsample=0.8,
         colsample_bytree=0.8,
+        scale_pos_weight=scale_weight,
         use_label_encoder=False,
         eval_metric="logloss",
         random_state=42,
@@ -236,7 +253,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train ML ensemble for trade prediction")
     parser.add_argument("--data", required=True, help="Path to training_data.csv")
     parser.add_argument("--output", required=True, help="Output directory for ONNX models")
-    parser.add_argument("--folds", type=int, default=5, help="Walk-forward CV folds")
+    parser.add_argument("--folds", type=int, default=10, help="Walk-forward CV folds")
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -255,12 +272,17 @@ def main():
     # Replace NaN/inf with 0
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # Compute class imbalance weight for walk-forward
+    n_neg = (y == 0).sum()
+    n_pos = (y == 1).sum()
+    spw = n_neg / n_pos if n_pos > 0 else 1.0
+
     # Walk-forward validation
     print("\n=== Walk-Forward Validation: XGBoost ===")
     xgb_fn = lambda: xgb.XGBClassifier(
         max_depth=4, n_estimators=100, learning_rate=0.05,
         reg_alpha=0.1, reg_lambda=1.0, min_child_weight=5,
-        subsample=0.8, colsample_bytree=0.8,
+        subsample=0.8, colsample_bytree=0.8, scale_pos_weight=spw,
         use_label_encoder=False, eval_metric="logloss", random_state=42,
     )
     xgb_metrics, xgb_overfit = walk_forward_evaluate(X, y, xgb_fn, args.folds)

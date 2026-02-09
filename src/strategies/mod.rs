@@ -21,6 +21,10 @@ pub trait Strategy: Send + Sync {
     fn reset(&mut self);
     /// Feed a BTC candle for cross-asset correlation strategies (default: no-op)
     fn update_btc_candle(&mut self, _candle: Candle) {}
+    /// Allow downcasting to concrete types for HMM injection
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]

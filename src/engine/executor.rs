@@ -10,6 +10,8 @@ use crate::notifications::{NotificationManager, position_opened, position_closed
 use crate::risk::RiskManager;
 use crate::strategies::{Strategy, StrategySignal};
 use crate::types::{CandleBuffer, OrderRequest, Side, Signal, TradingPair};
+use crate::ml::{TradePredictor, OutcomeTracker};
+use crate::ml::features;
 use super::{BotController, PaperTradingEngine, Portfolio};
 
 pub struct TradeExecutor {
@@ -18,6 +20,11 @@ pub struct TradeExecutor {
     config: Arc<RwLock<RuntimeConfig>>,
     controller: Arc<BotController>,
     notifications: Arc<NotificationManager>,
+    // ML components
+    ml_model: Arc<RwLock<TradePredictor>>,
+    outcome_tracker: Arc<RwLock<OutcomeTracker>>,
+    candle_buffers: Arc<RwLock<HashMap<TradingPair, CandleBuffer>>>,
+    ml_trade_ids: Arc<RwLock<HashMap<TradingPair, String>>>,
 }
 
 impl TradeExecutor {
@@ -34,7 +41,48 @@ impl TradeExecutor {
             config,
             controller,
             notifications,
+            ml_model: Arc::new(RwLock::new(TradePredictor::new())),
+            outcome_tracker: Arc::new(RwLock::new(OutcomeTracker::new())),
+            candle_buffers: Arc::new(RwLock::new(HashMap::new())),
+            ml_trade_ids: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Update candle buffer for ML feature extraction
+    pub async fn update_candles(&self, pair: TradingPair, candle: crate::types::Candle) {
+        let mut buffers = self.candle_buffers.write().await;
+        let buffer = buffers.entry(pair).or_insert_with(|| CandleBuffer::new(500));
+        buffer.push(candle);
+    }
+
+    /// Get candle buffer for a pair (for ML feature extraction)
+    async fn get_candle_buffer(&self, pair: TradingPair) -> Option<CandleBuffer> {
+        let buffers = self.candle_buffers.read().await;
+        buffers.get(&pair).cloned()
+    }
+
+    /// Record ML outcome when position is closed (stop-loss, take-profit, trailing stop)
+    async fn record_ml_outcome(&self, pair: TradingPair, _pnl: Decimal, pnl_pct: Decimal) {
+        let ml_trade_ids = self.ml_trade_ids.read().await;
+        if let Some(trade_id) = ml_trade_ids.get(&pair) {
+            let mut tracker = self.outcome_tracker.write().await;
+            tracker.record_exit(trade_id, pnl_pct);
+
+            // Retrain every 20 trades
+            let training_data = tracker.get_training_data();
+            if training_data.len() >= 30 && training_data.len() % 20 == 0 {
+                info!("Retraining ML model with {} samples", training_data.len());
+                let mut ml_model = self.ml_model.write().await;
+                if let Err(e) = ml_model.train(&training_data) {
+                    warn!("Failed to retrain ML model: {}", e);
+                }
+            }
+        }
+        drop(ml_trade_ids);
+
+        // Remove trade ID
+        let mut ml_trade_ids_mut = self.ml_trade_ids.write().await;
+        ml_trade_ids_mut.remove(&pair);
     }
 
     pub async fn process_signal(&self, signal: StrategySignal) -> Result<Option<String>> {
@@ -120,6 +168,20 @@ impl TradeExecutor {
             }
         }
 
+        // ML signal gating: extract features and check predictor
+        if let Some(buffer) = self.get_candle_buffer(signal.pair).await {
+            let tracker = self.outcome_tracker.read().await;
+            let recent = tracker.recent_trades(10);
+
+            if let Some(feats) = features::extract_features(signal, &buffer, &recent, None) {
+                let ml_model = self.ml_model.read().await;
+                if !ml_model.should_trade(&feats) {
+                    debug!("ML model rejected signal for {}", signal.pair);
+                    return false;
+                }
+            }
+        }
+
         true
     }
 
@@ -156,6 +218,23 @@ impl TradeExecutor {
         );
 
         let result = self.engine.place_order(order).await?;
+
+        // Record ML features for this trade
+        if let Some(buffer) = self.get_candle_buffer(signal.pair).await {
+            let tracker = self.outcome_tracker.read().await;
+            let recent = tracker.recent_trades(10);
+
+            if let Some(feats) = features::extract_features(signal, &buffer, &recent, None) {
+                drop(tracker); // Release read lock before acquiring write lock
+                let mut tracker_mut = self.outcome_tracker.write().await;
+                let trade_id = format!("{}_{}", signal.pair, chrono::Utc::now().timestamp_millis());
+                tracker_mut.record_entry(&trade_id, feats);
+
+                // Store trade ID for this pair
+                let mut ml_trade_ids = self.ml_trade_ids.write().await;
+                ml_trade_ids.insert(signal.pair, trade_id);
+            }
+        }
 
         // Increment trade count in controller
         self.controller.increment_trades();
@@ -200,6 +279,9 @@ impl TradeExecutor {
         );
 
         let result = self.engine.place_order(order).await?;
+
+        // Record ML outcome and retrain if needed
+        self.record_ml_outcome(signal.pair, position.unrealized_pnl, position.pnl_percentage()).await;
 
         // Send notification
         self.notifications.notify(position_closed(
@@ -260,6 +342,11 @@ impl TradeExecutor {
                         position.pair, position.stop_loss.unwrap_or_default(), current_price
                     );
 
+                    // Record ML outcome before closing
+                    let pair = position.pair;
+                    let pnl = position.unrealized_pnl;
+                    let pnl_pct = position.pnl_percentage();
+
                     // Send notification
                     self.notifications.notify(stop_loss_triggered(
                         position.pair,
@@ -270,8 +357,9 @@ impl TradeExecutor {
                     let order = OrderRequest::market(position.pair, Side::Sell, position.quantity);
                     if let Ok(result) = self.engine.place_order(order).await {
                         closed.push(result.client_order_id);
-                        if position.unrealized_pnl < Decimal::ZERO {
-                            self.risk_manager.record_loss(position.unrealized_pnl).await;
+                        self.record_ml_outcome(pair, pnl, pnl_pct).await;
+                        if pnl < Decimal::ZERO {
+                            self.risk_manager.record_loss(pnl).await;
                         }
                     }
                     continue;
@@ -284,6 +372,11 @@ impl TradeExecutor {
                         position.pair, position.take_profit.unwrap_or_default(), current_price
                     );
 
+                    // Record ML outcome before closing
+                    let pair = position.pair;
+                    let pnl = position.unrealized_pnl;
+                    let pnl_pct = position.pnl_percentage();
+
                     // Send notification
                     self.notifications.notify(take_profit_triggered(
                         position.pair,
@@ -294,6 +387,7 @@ impl TradeExecutor {
                     let order = OrderRequest::market(position.pair, Side::Sell, position.quantity);
                     if let Ok(result) = self.engine.place_order(order).await {
                         closed.push(result.client_order_id);
+                        self.record_ml_outcome(pair, pnl, pnl_pct).await;
                     }
                     continue;
                 }
@@ -311,6 +405,10 @@ impl TradeExecutor {
                         close_reason, position.pair, pnl_pct, peak_pnl_pct, holding_hours
                     );
 
+                    // Record ML outcome before closing
+                    let pair = position.pair;
+                    let pnl = position.unrealized_pnl;
+
                     self.notifications.notify(stop_loss_triggered(
                         position.pair,
                         current_price,
@@ -320,8 +418,9 @@ impl TradeExecutor {
                     let order = OrderRequest::market(position.pair, Side::Sell, position.quantity);
                     if let Ok(result) = self.engine.place_order(order).await {
                         closed.push(result.client_order_id);
-                        if position.unrealized_pnl < Decimal::ZERO {
-                            self.risk_manager.record_loss(position.unrealized_pnl).await;
+                        self.record_ml_outcome(pair, pnl, pnl_pct).await;
+                        if pnl < Decimal::ZERO {
+                            self.risk_manager.record_loss(pnl).await;
                         }
                     }
                     continue;

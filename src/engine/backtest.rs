@@ -577,7 +577,7 @@ impl BacktestEngine {
         if side == Some(Side::Buy) && !has_position {
             if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
                 let recent = self.outcome_tracker.recent_trades(10);
-                let feats = features::extract_features(&signal, buffer, &recent, None, None);
+                let feats = features::extract_features(&signal, buffer, &recent, None);
                 if let Some(ref f) = feats {
                     let should_trade = if let Some(ref mut ensemble) = self.ensemble_predictor {
                         ensemble.should_trade(f)
@@ -598,7 +598,7 @@ impl BacktestEngine {
                 // Record ML features for this trade
                 if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
                     let recent = self.outcome_tracker.recent_trades(10);
-                    if let Some(feats) = features::extract_features(&signal, buffer, &recent, None, None) {
+                    if let Some(feats) = features::extract_features(&signal, buffer, &recent, None) {
                         let trade_id = format!("{}_{}", signal.pair, self.candles_processed);
                         self.outcome_tracker.record_entry(&trade_id, feats);
                         self.ml_trade_ids.insert(signal.pair, trade_id);

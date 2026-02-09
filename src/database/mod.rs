@@ -278,6 +278,103 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // ML Features table - stores feature vectors at trade entry
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ml_features (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                pair TEXT NOT NULL,
+                features_json TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ml_features_timestamp ON ml_features(timestamp)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ml_features_pair ON ml_features(pair)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ML Training Data table - stores complete trade outcomes with features
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ml_training_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_time TEXT NOT NULL,
+                exit_time TEXT NOT NULL,
+                pair TEXT NOT NULL,
+                features_json TEXT NOT NULL,
+                win INTEGER NOT NULL,
+                pnl_pct TEXT NOT NULL,
+                rr_ratio TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ml_training_entry_time ON ml_training_data(entry_time)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ml_training_pair ON ml_training_data(pair)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ML Models table - stores trained model metadata and paths
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ml_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_type TEXT NOT NULL,
+                version TEXT NOT NULL,
+                trained_at TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                model_path TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ml_models_type ON ml_models(model_type)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ml_models_active ON ml_models(is_active)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
