@@ -573,20 +573,19 @@ impl BacktestEngine {
             }
         }
 
-        // ML signal gating: prefer ensemble if loaded, fall back to logistic regression
+        // ML signal gating: only filter via ONNX ensemble if loaded
+        // The internal logistic regression is too noisy with limited data,
+        // so we only gate on the externally-trained ensemble models.
         if side == Some(Side::Buy) && !has_position {
-            if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
-                let recent = self.outcome_tracker.recent_trades(10);
-                let feats = features::extract_features(&signal, buffer, &recent, None);
-                if let Some(ref f) = feats {
-                    let should_trade = if let Some(ref mut ensemble) = self.ensemble_predictor {
-                        ensemble.should_trade(f)
-                    } else {
-                        self.trade_predictor.should_trade(f)
-                    };
-                    if !should_trade {
-                        debug!("ML model rejected signal for {}", signal.pair);
-                        return Ok(());
+            if let Some(ref mut ensemble) = self.ensemble_predictor {
+                if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
+                    let recent = self.outcome_tracker.recent_trades(10);
+                    let feats = features::extract_features(&signal, buffer, &recent, None);
+                    if let Some(ref f) = feats {
+                        if !ensemble.should_trade(f) {
+                            debug!("ML ensemble rejected signal for {}", signal.pair);
+                            return Ok(());
+                        }
                     }
                 }
             }

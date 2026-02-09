@@ -764,16 +764,18 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
     info!("\n{}", "=".repeat(80));
     info!("SCENARIO 1: Conservative");
     info!("{}", "=".repeat(80));
+    let core_pairs = vec![
+        TradingPair::BTCUSDT,
+        TradingPair::ETHUSDT,
+        TradingPair::SOLUSDT,
+    ];
+
     let conservative = BacktestConfig {
         start_date,
         end_date,
         initial_capital: Decimal::from(10000),
         timeframe: TimeFrame::H1,
-        pairs: vec![
-            TradingPair::BTCUSDT,
-            TradingPair::ETHUSDT,
-            TradingPair::SOLUSDT,
-        ],
+        pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
         min_confidence: dec!(0.68),   // High bar: only strong signals
@@ -803,17 +805,13 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         end_date,
         initial_capital: Decimal::from(10000),
         timeframe: TimeFrame::H1,
-        pairs: vec![
-            TradingPair::BTCUSDT,
-            TradingPair::ETHUSDT,
-            TradingPair::SOLUSDT,
-        ],
+        pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.65),   // Same as H4 moderate
-        min_risk_reward: dec!(2.0),   // Same as H4
-        risk_per_trade: dec!(0.05),   // 5% risk per trade (same as H4)
-        max_allocation: dec!(0.60),   // 60% max allocation (same as H4)
+        min_confidence: dec!(0.65),   // Balanced confidence
+        min_risk_reward: dec!(2.0),   // Solid R:R
+        risk_per_trade: dec!(0.05),   // 5% risk per trade
+        max_allocation: dec!(0.60),   // 60% max allocation
         max_correlated_positions: 2,
         max_drawdown_pct: dec!(15),
         walk_forward_windows: None,
@@ -837,11 +835,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         end_date,
         initial_capital: Decimal::from(10000),
         timeframe: TimeFrame::H1,
-        pairs: vec![
-            TradingPair::BTCUSDT,
-            TradingPair::ETHUSDT,
-            TradingPair::SOLUSDT,
-        ],
+        pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
         min_confidence: dec!(0.55),   // Lower bar: more trades
