@@ -96,7 +96,7 @@ enum Commands {
         #[arg(short, long, default_value = "training_data.csv")]
         output: String,
     },
-    /// Export per-signal training data with forward returns (M1 timeframe)
+    /// Export per-signal training data with forward returns
     ExportSignals {
         /// Start date (YYYY-MM-DD)
         #[arg(short, long)]
@@ -105,9 +105,12 @@ enum Commands {
         #[arg(short, long)]
         end: String,
         /// Output CSV file path
-        #[arg(short, long, default_value = "signals_m1.csv")]
+        #[arg(short, long, default_value = "signals.csv")]
         output: String,
-        /// Lookahead candles for forward return (default: 15 = 15min on M1)
+        /// Timeframe: M1, M5, M15, H1, H4, D1 (default: H1)
+        #[arg(short, long, default_value = "H1")]
+        timeframe: String,
+        /// Lookahead candles for forward return (default: 15)
         #[arg(short, long, default_value = "15")]
         lookahead: usize,
         /// Win threshold percentage (default: 0.5%)
@@ -187,8 +190,8 @@ async fn main() -> Result<()> {
         Commands::ExportTrainingData { start, end, output } => {
             export_training_data(&start, &end, &output).await?;
         }
-        Commands::ExportSignals { start, end, output, lookahead, win_threshold, pairs } => {
-            export_signals(&start, &end, &output, lookahead, win_threshold, pairs.as_deref()).await?;
+        Commands::ExportSignals { start, end, output, timeframe, lookahead, win_threshold, pairs } => {
+            export_signals(&start, &end, &output, &timeframe, lookahead, win_threshold, pairs.as_deref()).await?;
         }
         Commands::Prices => {
             show_prices().await?;
@@ -851,7 +854,7 @@ async fn run_backtest(start: &str, end: &str, timeframe_str: &str, save_to_db: b
         risk_per_trade: dec!(0.05),   // 5% risk per trade
         max_allocation: dec!(0.60),   // 60% max allocation
         max_correlated_positions: 2,
-        max_drawdown_pct: dec!(15),
+        max_drawdown_pct: dec!(15),   // Moderate emergency stop
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: hmm_path.map(|s| s.to_string()),
@@ -876,12 +879,12 @@ async fn run_backtest(start: &str, end: &str, timeframe_str: &str, save_to_db: b
         pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
-        min_confidence: dec!(0.55),   // Lower bar: more trades
-        min_risk_reward: dec!(1.5),   // Accept lower R:R
-        risk_per_trade: dec!(0.12),   // 12% risk per trade
-        max_allocation: dec!(0.90),   // 90% max allocation per position
-        max_correlated_positions: 3,
-        max_drawdown_pct: dec!(20),   // Wider emergency stop
+        min_confidence: dec!(0.60),   // Moderate bar: quality over quantity
+        min_risk_reward: dec!(1.8),   // Require decent R:R
+        risk_per_trade: dec!(0.07),   // 7% risk per trade
+        max_allocation: dec!(0.60),   // 60% max allocation
+        max_correlated_positions: 2,
+        max_drawdown_pct: dec!(15),   // Moderate emergency stop
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: hmm_path.map(|s| s.to_string()),
@@ -1046,6 +1049,7 @@ async fn export_signals(
     start: &str,
     end: &str,
     output: &str,
+    timeframe_str: &str,
     lookahead: usize,
     win_threshold: f64,
     pairs_str: Option<&str>,
@@ -1055,7 +1059,18 @@ async fn export_signals(
     let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
         .map_err(|_| anyhow!("Invalid end date format. Use YYYY-MM-DD"))?;
 
-    info!("=== Exporting Per-Signal Training Data (M1) ===");
+    // Parse timeframe
+    let timeframe = match timeframe_str.to_uppercase().as_str() {
+        "M1" => TimeFrame::M1,
+        "M5" => TimeFrame::M5,
+        "M15" => TimeFrame::M15,
+        "H1" => TimeFrame::H1,
+        "H4" => TimeFrame::H4,
+        "D1" => TimeFrame::D1,
+        _ => return Err(anyhow!("Invalid timeframe: {}. Use M1, M5, M15, H1, H4, or D1", timeframe_str)),
+    };
+
+    info!("=== Exporting Per-Signal Training Data ({}) ===", timeframe.as_str());
     info!("Period: {} to {}", start_date, end_date);
     info!("Lookahead: {} candles ({} minutes)", lookahead, lookahead);
     info!("Win threshold: {:.2}%", win_threshold);
@@ -1087,7 +1102,7 @@ async fn export_signals(
     let config = engine::SignalCollectionConfig {
         start_date,
         end_date,
-        timeframe: TimeFrame::M1,
+        timeframe,
         pairs,
         lookahead_candles: lookahead,
         win_threshold_pct: win_threshold,

@@ -464,9 +464,9 @@ impl BacktestEngine {
                             .sum::<f64>() / (n - 1.0);
                         let daily_vol = variance.sqrt();
                         let annualized_vol = daily_vol * 365.0f64.sqrt();
-                        // Target 18% annualized portfolio volatility
+                        // Target 14% annualized portfolio volatility (smoother equity curve)
                         if annualized_vol > 0.01 {
-                            let scale = (0.18 / annualized_vol).clamp(0.4, 1.8);
+                            let scale = (0.14 / annualized_vol).clamp(0.4, 1.5);
                             self.vol_scale = Decimal::try_from(scale).unwrap_or(Decimal::ONE);
                         }
                     }
@@ -561,7 +561,7 @@ impl BacktestEngine {
             }
         }
 
-        // Check cooldown: skip re-entry within 24 candles after a stop-loss exit (~24h at 1H)
+        // Check cooldown: skip re-entry within 6 candles after a stop-loss exit
         if side == Some(Side::Buy) && !has_position {
             if let Some(&exit_candle) = self.last_exit_candle.get(&signal.pair) {
                 let is_stoploss = self.last_exit_was_stoploss.get(&signal.pair).copied().unwrap_or(false);
@@ -579,8 +579,10 @@ impl BacktestEngine {
         if side == Some(Side::Buy) && !has_position {
             if let Some(ref mut ensemble) = self.ensemble_predictor {
                 if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
-                    let recent = self.outcome_tracker.recent_trades(10);
-                    let feats = features::extract_features(&signal, buffer, &recent, None);
+                    // Pass empty trades so recent_win_rate/avg_pnl/streak stay 0.0
+                    // (matches training data where these features were constant)
+                    let empty_trades: Vec<crate::ml::features::RecentTrade> = vec![];
+                    let feats = features::extract_features(&signal, buffer, &empty_trades, None);
                     if let Some(ref f) = feats {
                         if !ensemble.should_trade(f) {
                             debug!("ML ensemble rejected signal for {}", signal.pair);
@@ -668,9 +670,9 @@ impl BacktestEngine {
 
         // Drawdown-based position scaling: reduce exposure during drawdowns
         let current_dd = self.portfolio.max_drawdown;
-        if current_dd > dec!(5) {
-            // Linear scale-down from 5% DD (1.0x) to 15% DD (0.3x)
-            let dd_scale = (Decimal::ONE - (current_dd - dec!(5)) / dec!(10)).max(dec!(0.3));
+        if current_dd > dec!(4) {
+            // Linear scale-down from 4% DD (1.0x) to 12% DD (0.25x)
+            let dd_scale = (Decimal::ONE - (current_dd - dec!(4)) / dec!(8)).max(dec!(0.25));
             quantity = quantity * dd_scale;
             debug!("Drawdown scaling: {:.1}% DD -> {:.2}x size", current_dd, dd_scale);
         }
@@ -777,18 +779,18 @@ impl BacktestEngine {
             }
         }
 
-        // Trailing stop: if position reached 8%+ profit, trail at 3% from peak
-        // Balanced thresholds for H1 candles
         let current_peak = if best_pnl_pct > position.peak_pnl_pct {
             best_pnl_pct
         } else {
             position.peak_pnl_pct
         };
-        if current_peak >= dec!(15) {
+
+        // Trailing stop: if position reached 8%+ profit, trail at 4% from peak
+        if current_peak >= dec!(8) {
             let current_pnl_pct = (candle.low - position.entry_price) / position.entry_price * dec!(100);
             let drawdown_from_peak = current_peak - current_pnl_pct;
-            if drawdown_from_peak >= dec!(6) {
-                let trail_price = position.entry_price * (Decimal::ONE + (current_peak - dec!(6)) / dec!(100));
+            if drawdown_from_peak >= dec!(4) {
+                let trail_price = position.entry_price * (Decimal::ONE + (current_peak - dec!(4)) / dec!(100));
                 debug!("[{}] Trailing stop triggered: peak={:.2}%, current low PnL={:.2}%, trail price={:.2}",
                     pair, current_peak, current_pnl_pct, trail_price);
                 return self.close_position_internal(&position, trail_price, candle.open_time, ExitReason::TrailingStop);

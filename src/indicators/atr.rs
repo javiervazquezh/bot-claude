@@ -133,10 +133,10 @@ pub enum VolatilityLevel {
 impl VolatilityLevel {
     pub fn position_size_factor(&self) -> Decimal {
         match self {
-            VolatilityLevel::Low => Decimal::new(7, 1),     // 0.7x (choppy, reduce)
-            VolatilityLevel::Medium => Decimal::ONE,         // 1.0x (baseline)
-            VolatilityLevel::High => Decimal::new(13, 1),    // 1.3x (trending, increase)
-            VolatilityLevel::Extreme => Decimal::new(6, 1),  // 0.6x (crash risk, reduce)
+            VolatilityLevel::Low => Decimal::ONE,            // 1.0x (let vol targeting handle sizing)
+            VolatilityLevel::Medium => Decimal::ONE,         // 1.0x
+            VolatilityLevel::High => Decimal::new(8, 1),     // 0.8x (reduce in high vol)
+            VolatilityLevel::Extreme => Decimal::new(5, 1),  // 0.5x (crash protection only)
         }
     }
 }
