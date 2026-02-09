@@ -10,10 +10,10 @@ use serde_json::json;
 use tracing::{debug, error, info};
 
 use crate::config::{
-    RuntimeConfig, RiskSettings, ExecutorSettings, StrategySettings, GeneralSettings,
+    RiskSettings, ExecutorSettings, StrategySettings, GeneralSettings,
     StrategyProfile, StrategyConfig,
 };
-use super::{AppState, DashboardState, DashboardEvent};
+use super::{AppState, DashboardEvent};
 
 // === Dashboard Data Endpoints ===
 
@@ -485,7 +485,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
     // Handle incoming messages (for ping/pong)
     while let Some(msg) = receiver.next().await {
         match msg {
-            Ok(Message::Ping(data)) => {
+            Ok(Message::Ping(_data)) => {
                 debug!("Received ping");
             }
             Ok(Message::Close(_)) => {
@@ -556,7 +556,7 @@ pub async fn post_select_profile(
     Json(req): Json<SelectProfileRequest>,
 ) -> impl IntoResponse {
     // Apply the profile configuration
-    let profile_config = match req.profile {
+    let _profile_config = match req.profile {
         StrategyProfile::UltraAggressive => StrategyConfig::ultra_aggressive(),
         StrategyProfile::Conservative5Year => StrategyConfig::conservative_5year(),
         StrategyProfile::Custom => {

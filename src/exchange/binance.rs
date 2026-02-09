@@ -1,13 +1,14 @@
+#![allow(dead_code)]
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::str::FromStr;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::types::{
     Candle, OCOOrderRequest, OCOOrderResult, Order, OrderRequest, OrderStatus, OrderType, Side,

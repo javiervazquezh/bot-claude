@@ -8,6 +8,5 @@ pub mod ensemble;
 pub use features::TradeFeatures;
 pub use model::TradePredictor;
 pub use tracker::OutcomeTracker;
-pub use persistence::{ModelPersistence, ModelType, ModelVersion, ModelMetrics};
-pub use hmm::{GaussianHMM, RegimeState};
+pub use hmm::RegimeState;
 pub use ensemble::EnsemblePredictor;

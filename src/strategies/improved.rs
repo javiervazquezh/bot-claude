@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rust_decimal_macros::dec;
 use crate::indicators::{ATR, EMA, RSI, MACD, Indicator};
 use crate::types::{CandleBuffer, Signal, TradingPair};
@@ -113,7 +114,7 @@ impl Strategy for ImprovedStrategy {
 
         let current = candles.last()?;
         let price = current.close;
-        let ema20 = self.ema_20.value()?;
+        let _ema20 = self.ema_20.value()?;
         let ema50 = self.ema_50.value()?;
         let ema100 = self.ema_100.value()?;
         let rsi = self.rsi.value()?;

@@ -1,12 +1,10 @@
+#![allow(dead_code)]
 pub mod trend;
 pub mod momentum;
 pub mod mean_reversion;
 pub mod combined;
 pub mod improved;
 
-pub use trend::*;
-pub use momentum::*;
-pub use mean_reversion::*;
 pub use combined::*;
 pub use improved::*;
 

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rust_decimal::Decimal;
 use crate::indicators::{ATR, DoubleEMA, MACD, Indicator};
 use crate::indicators::volume::VWAP;

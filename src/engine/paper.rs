@@ -1,16 +1,15 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
-use uuid::Uuid;
+use tracing::{info, warn};
 
 use crate::exchange::BinanceClient;
 use crate::types::{
-    Candle, CandleBuffer, Order, OrderRequest, OrderStatus, OrderType, Position, Side,
-    Ticker, TimeFrame, TradingPair,
+    Candle, CandleBuffer, Order, OrderRequest, OrderStatus, OrderType, Position, Side, TimeFrame, TradingPair,
 };
 use super::Portfolio;
 

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -6,7 +7,7 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::types::{
-    Order, OrderStatus, Position, PositionStatus, PortfolioSnapshot, Side, TradingPair,
+    Order, OrderStatus, Position, PositionStatus, PortfolioSnapshot, TradingPair,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,13 +270,13 @@ impl Portfolio {
     }
 
     /// Close a portion of an existing position
-    pub fn partial_close_position(&mut self, position_id: &str, quantity: Decimal, price: Decimal) -> Result<Decimal> {
+    pub fn partial_close_position(&mut self, _position_id: &str, _quantity: Decimal, _price: Decimal) -> Result<Decimal> {
         Err(anyhow::anyhow!("Partial close not supported - position management removed"))
     }
 
 
     /// Update trailing stops for all open positions and return IDs of positions to close
-    pub fn update_all_trailing_stops(&mut self, prices: &HashMap<TradingPair, Decimal>) -> Vec<String> {
+    pub fn update_all_trailing_stops(&mut self, _prices: &HashMap<TradingPair, Decimal>) -> Vec<String> {
         Vec::new()
     }
 

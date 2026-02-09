@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 pub mod gaussian_hmm;
 pub mod features;
 pub mod regime_detector;

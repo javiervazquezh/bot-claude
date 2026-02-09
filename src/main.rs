@@ -17,7 +17,6 @@ use clap::{Parser, Subcommand};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -26,7 +25,7 @@ use engine::{BacktestConfig, BacktestEngine, BotController, PaperTradingEngine, 
 use exchange::{BinanceClient, BinanceWebSocket, MarketEvent};
 use risk::RiskManager;
 use strategies::{create_strategies_for_pair, CombinedStrategy, Strategy};
-use types::{TimeFrame, TradingPair, CandleBuffer, Signal, Side};
+use types::{TimeFrame, TradingPair, CandleBuffer, Side};
 use web::{AppState, DashboardState, start_dashboard_server, SignalRecord, PortfolioState, PositionInfo, TradeRecord};
 
 #[derive(Parser)]

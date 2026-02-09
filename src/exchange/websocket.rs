@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::{anyhow, Result};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -8,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use crate::types::{Candle, Side, Ticker, TimeFrame, Trade, TradingPair};
+use crate::types::{Candle, Ticker, TimeFrame, Trade, TradingPair};
 use super::orderbook::{OrderBookSnapshot, OrderBookLevel};
 
 const BINANCE_US_WS: &str = "wss://stream.binance.us:9443/ws";

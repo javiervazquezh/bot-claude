@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rust_decimal::Decimal;
 use super::Indicator;
 
@@ -45,7 +46,7 @@ impl ATR {
         self.value
     }
 
-    fn calculate_true_range(&self, high: Decimal, low: Decimal, close: Decimal) -> Decimal {
+    fn calculate_true_range(&self, high: Decimal, low: Decimal, _close: Decimal) -> Decimal {
         let hl = high - low;
 
         match self.prev_close {

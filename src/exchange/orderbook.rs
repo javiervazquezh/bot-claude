@@ -1,4 +1,4 @@
-use anyhow::Result;
+#![allow(dead_code)]
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -68,7 +68,7 @@ impl OrderBookSnapshot {
         let mut ask_pressure = dec!(0);
 
         // Weight levels by inverse distance from mid
-        for (i, bid) in self.bids.iter().take(5).enumerate() {
+        for (_i, bid) in self.bids.iter().take(5).enumerate() {
             let distance = mid - bid.price;
             if distance > dec!(0) {
                 let weight = dec!(1) / (distance + dec!(0.0001));
@@ -76,7 +76,7 @@ impl OrderBookSnapshot {
             }
         }
 
-        for (i, ask) in self.asks.iter().take(5).enumerate() {
+        for (_i, ask) in self.asks.iter().take(5).enumerate() {
             let distance = ask.price - mid;
             if distance > dec!(0) {
                 let weight = dec!(1) / (distance + dec!(0.0001));
@@ -296,7 +296,7 @@ mod tests {
 
     fn mock_snapshot() -> OrderBookSnapshot {
         OrderBookSnapshot {
-            pair: TradingPair::BTCUSD,
+            pair: TradingPair::BTCUSDT,
             timestamp: Utc::now(),
             bids: vec![
                 OrderBookLevel { price: dec!(50000), quantity: dec!(1.0) },
@@ -343,8 +343,8 @@ mod tests {
 
         manager.update(snapshot.clone());
 
-        let latest = manager.latest(TradingPair::BTCUSD).unwrap();
-        assert_eq!(latest.pair, TradingPair::BTCUSD);
+        let latest = manager.latest(TradingPair::BTCUSDT).unwrap();
+        assert_eq!(latest.pair, TradingPair::BTCUSDT);
     }
 
     #[test]
@@ -354,7 +354,7 @@ mod tests {
 
         manager.update(snapshot);
 
-        let features = OrderBookFeatures::extract(&manager, TradingPair::BTCUSD).unwrap();
+        let features = OrderBookFeatures::extract(&manager, TradingPair::BTCUSDT).unwrap();
         assert!(features.spread_pct > dec!(0));
         assert!(features.depth_imbalance.abs() <= dec!(1));
     }

@@ -1,10 +1,10 @@
+#![allow(dead_code)]
 pub mod binance;
 pub mod websocket;
 pub mod orderbook;
 
 pub use binance::*;
 pub use websocket::*;
-pub use orderbook::*;
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;

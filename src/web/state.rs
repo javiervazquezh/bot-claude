@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::config::{ConfigChangeEvent, RuntimeConfigManager};
-use crate::engine::{BotController, BotState, BotStatus};
-use crate::types::{Position, Side, Signal, TradingPair};
+use crate::engine::{BotController, BotState};
+use crate::types::{Side, TradingPair};
 
 const MAX_SIGNALS: usize = 100;
 const MAX_PRICE_HISTORY: usize = 500;

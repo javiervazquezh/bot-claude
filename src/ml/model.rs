@@ -1,5 +1,6 @@
+#![allow(dead_code)]
 use anyhow::{anyhow, Result};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 

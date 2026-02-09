@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use rust_decimal::Decimal;
@@ -8,10 +9,9 @@ use uuid::Uuid;
 
 use crate::exchange::BinanceClient;
 use crate::ml::{TradeFeatures, TradePredictor, OutcomeTracker};
-use crate::ml::features::{self, RecentTrade};
+use crate::ml::features::{self};
 use crate::strategies::{Strategy, StrategySignal, create_improved_strategy, create_strategies_for_pair};
-use crate::strategies::combined::CombinedStrategy;
-use crate::types::{Candle, CandleBuffer, Position, PositionStatus, Side, Signal, TimeFrame, TradingPair};
+use crate::types::{Candle, CandleBuffer, Position, PositionStatus, Side, TimeFrame, TradingPair};
 
 use super::results::{BacktestResults, EquityPoint, ExitReason, MetricsCalculator, TradeRecord, WalkForwardResult, WindowResult};
 use super::Portfolio;

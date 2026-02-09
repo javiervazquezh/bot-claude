@@ -2,7 +2,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::strategies::StrategySignal;
-use crate::types::{CandleBuffer, Signal, TradingPair};
+use crate::types::{CandleBuffer, TradingPair};
 
 /// Fixed-size feature vector for ML prediction
 #[derive(Debug, Clone, Serialize, Deserialize)]

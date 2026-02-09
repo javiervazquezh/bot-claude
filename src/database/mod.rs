@@ -1,9 +1,9 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use sqlx::{Row, Sqlite};
-use std::path::Path;
+use sqlx::Row;
 use std::str::FromStr;
 use tracing::info;
 

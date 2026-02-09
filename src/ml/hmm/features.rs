@@ -1,6 +1,5 @@
 use anyhow::Result;
-use ndarray::{Array1, Array2};
-use rust_decimal::Decimal;
+use ndarray::Array2;
 
 use crate::types::CandleBuffer;
 
@@ -231,6 +230,7 @@ mod tests {
     use super::*;
     use crate::types::{Candle, TradingPair, TimeFrame};
     use chrono::Utc;
+    use rust_decimal::Decimal;
 
     fn create_test_candles(n: usize) -> CandleBuffer {
         let mut buffer = CandleBuffer::new(n);

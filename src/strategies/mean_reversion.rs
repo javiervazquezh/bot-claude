@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rust_decimal::Decimal;
 use crate::indicators::{ATR, BollingerBands, RSI, Indicator};
 use crate::indicators::volume::MoneyFlowIndex;
@@ -53,7 +54,7 @@ impl MeanReversionStrategy {
         price: Decimal,
         bb_upper: Decimal,
         bb_lower: Decimal,
-        bb_middle: Decimal,
+        _bb_middle: Decimal,
         rsi: Decimal,
     ) -> (Signal, Decimal, String) {
         let is_at_lower = price <= bb_lower;

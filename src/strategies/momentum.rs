@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rust_decimal::Decimal;
 use crate::indicators::{ATR, EMA, RSI, VolumeProfile, Indicator};
 use crate::indicators::volume::OBV;
@@ -303,7 +304,7 @@ impl Strategy for VolumeBreakoutStrategy {
         self.candles_processed = len;
 
         let current = candles.last()?;
-        let recent = candles.last_n(self.lookback);
+        let _recent = candles.last_n(self.lookback);
 
         let avg_volume = self.volume_profile.avg_volume()?;
         let atr = self.atr.value()?;

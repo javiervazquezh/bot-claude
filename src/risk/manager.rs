@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -233,7 +234,7 @@ impl RiskManager {
     }
 
     pub async fn assess_portfolio_risk(&self, portfolio: &Portfolio) -> RiskAssessment {
-        let config = self.config.read().await;
+        let _config = self.config.read().await;
         let daily_loss = *self.daily_loss.read().await;
 
         let position_count = portfolio.position_count();

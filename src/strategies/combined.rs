@@ -1,6 +1,6 @@
+#![allow(dead_code)]
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use crate::indicators::Indicator;
 use crate::indicators::atr::{ATR, VolatilityLevel};
 use crate::indicators::ema::EMA;
@@ -8,7 +8,7 @@ use crate::ml::hmm::RegimeDetector;
 use crate::ml::RegimeState;
 use crate::types::{Candle, CandleBuffer, Signal, TradingPair};
 use super::{Strategy, StrategySignal};
-use super::trend::{TrendStrategy, BreakoutStrategy};
+use super::trend::TrendStrategy;
 use super::momentum::{MomentumStrategy, VolumeBreakoutStrategy};
 use super::mean_reversion::{MeanReversionStrategy, RSIDivergenceStrategy};
 

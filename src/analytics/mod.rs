@@ -5,7 +5,7 @@ use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::types::{Side, TradingPair};
+use crate::types::TradingPair;
 use crate::web::state::TradeRecord;
 
 /// Comprehensive performance analytics
