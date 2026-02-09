@@ -68,6 +68,9 @@ enum Commands {
         /// End date (YYYY-MM-DD)
         #[arg(short, long)]
         end: String,
+        /// Timeframe: M1, M5, M15, H1, H4, D1 (default: H1)
+        #[arg(short, long, default_value = "H1")]
+        timeframe: String,
         /// Save trades to database for dashboard visualization
         #[arg(long)]
         save_to_db: bool,
@@ -92,6 +95,27 @@ enum Commands {
         /// Output CSV file path
         #[arg(short, long, default_value = "training_data.csv")]
         output: String,
+    },
+    /// Export per-signal training data with forward returns (M1 timeframe)
+    ExportSignals {
+        /// Start date (YYYY-MM-DD)
+        #[arg(short, long)]
+        start: String,
+        /// End date (YYYY-MM-DD)
+        #[arg(short, long)]
+        end: String,
+        /// Output CSV file path
+        #[arg(short, long, default_value = "signals_m1.csv")]
+        output: String,
+        /// Lookahead candles for forward return (default: 15 = 15min on M1)
+        #[arg(short, long, default_value = "15")]
+        lookahead: usize,
+        /// Win threshold percentage (default: 0.5%)
+        #[arg(short = 'w', long, default_value = "0.5")]
+        win_threshold: f64,
+        /// Trading pairs (comma-separated, e.g., "BTCUSDT,ETHUSDT,SOLUSDT")
+        #[arg(short, long)]
+        pairs: Option<String>,
     },
     /// Show current market prices
     Prices,
@@ -153,15 +177,18 @@ async fn main() -> Result<()> {
         Commands::Live => {
             error!("Live trading not yet implemented. Use paper trading mode first.");
         }
-        Commands::Backtest { start, end, save_to_db, walk_forward, hmm, ensemble } => {
+        Commands::Backtest { start, end, timeframe, save_to_db, walk_forward, hmm, ensemble } => {
             if let Some(n_windows) = walk_forward {
-                run_walk_forward_backtest(&start, &end, n_windows, hmm.as_deref()).await?;
+                run_walk_forward_backtest(&start, &end, &timeframe, n_windows, hmm.as_deref()).await?;
             } else {
-                run_backtest(&start, &end, save_to_db, hmm.as_deref(), ensemble.as_deref()).await?;
+                run_backtest(&start, &end, &timeframe, save_to_db, hmm.as_deref(), ensemble.as_deref()).await?;
             }
         }
         Commands::ExportTrainingData { start, end, output } => {
             export_training_data(&start, &end, &output).await?;
+        }
+        Commands::ExportSignals { start, end, output, lookahead, win_threshold, pairs } => {
+            export_signals(&start, &end, &output, lookahead, win_threshold, pairs.as_deref()).await?;
         }
         Commands::Prices => {
             show_prices().await?;
@@ -654,7 +681,7 @@ async fn analyze_market(pair_str: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option<&str>, ensemble_dir: Option<&str>) -> Result<()> {
+async fn run_backtest(start: &str, end: &str, timeframe_str: &str, save_to_db: bool, hmm_path: Option<&str>, ensemble_dir: Option<&str>) -> Result<()> {
     // Parse dates
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
@@ -665,12 +692,23 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         return Err(anyhow!("End date must be after start date"));
     }
 
+    // Parse timeframe
+    let timeframe = match timeframe_str.to_uppercase().as_str() {
+        "M1" => TimeFrame::M1,
+        "M5" => TimeFrame::M5,
+        "M15" => TimeFrame::M15,
+        "H1" => TimeFrame::H1,
+        "H4" => TimeFrame::H4,
+        "D1" => TimeFrame::D1,
+        _ => return Err(anyhow!("Invalid timeframe: {}. Use M1, M5, M15, H1, H4, or D1", timeframe_str)),
+    };
+
     // If save_to_db is set, run a simplified single scenario and save to database
     if save_to_db {
         info!("=== Running Backtest and Saving to Database ===");
         info!("Period: {} to {}", start_date, end_date);
         info!("Pairs: BTC, ETH, SOL");
-        info!("Timeframe: 1-hour");
+        info!("Timeframe: {}", timeframe.as_str());
         info!("Initial Capital: $10,000");
         info!("Strategy: Conservative (5% risk, 60% allocation)");
         info!("This will take several minutes to fetch and process data...");
@@ -686,7 +724,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
             start_date,
             end_date,
             initial_capital: Decimal::from(10000),
-            timeframe: TimeFrame::H1,
+            timeframe,
             pairs: vec![
                 TradingPair::BTCUSDT,
                 TradingPair::ETHUSDT,
@@ -755,7 +793,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
     info!("=== Starting Comprehensive Backtest Comparison ===");
     info!("Period: {} to {}", start_date, end_date);
     info!("Pairs: BTC, ETH, SOL");
-    info!("Timeframe: 1-hour");
+    info!("Timeframe: {}", timeframe.as_str());
     info!("Initial Capital: $10,000");
     info!("Running 3 scenarios: Conservative, Moderate, Aggressive");
     println!();
@@ -774,7 +812,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         start_date,
         end_date,
         initial_capital: Decimal::from(10000),
-        timeframe: TimeFrame::H1,
+        timeframe,
         pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
@@ -804,7 +842,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         start_date,
         end_date,
         initial_capital: Decimal::from(10000),
-        timeframe: TimeFrame::H1,
+        timeframe,
         pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
@@ -834,7 +872,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         start_date,
         end_date,
         initial_capital: Decimal::from(10000),
-        timeframe: TimeFrame::H1,
+        timeframe,
         pairs: core_pairs.clone(),
         fee_rate: dec!(0.001),
         slippage_rate: dec!(0.0005),
@@ -873,7 +911,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
     Ok(())
 }
 
-async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize, hmm_path: Option<&str>) -> Result<()> {
+async fn run_walk_forward_backtest(start: &str, end: &str, timeframe_str: &str, n_windows: usize, hmm_path: Option<&str>) -> Result<()> {
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
     let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
@@ -887,18 +925,29 @@ async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize, hmm
         return Err(anyhow!("Walk-forward requires at least 2 windows"));
     }
 
+    // Parse timeframe
+    let timeframe = match timeframe_str.to_uppercase().as_str() {
+        "M1" => TimeFrame::M1,
+        "M5" => TimeFrame::M5,
+        "M15" => TimeFrame::M15,
+        "H1" => TimeFrame::H1,
+        "H4" => TimeFrame::H4,
+        "D1" => TimeFrame::D1,
+        _ => return Err(anyhow!("Invalid timeframe: {}. Use M1, M5, M15, H1, H4, or D1", timeframe_str)),
+    };
+
     info!("=== Rolling Window Backtest ===");
     info!("Period: {} to {}", start_date, end_date);
     info!("Windows: {}", n_windows);
     info!("Pairs: BTC, ETH, SOL");
-    info!("Timeframe: 1-hour");
+    info!("Timeframe: {}", timeframe.as_str());
     println!();
 
     let config = BacktestConfig {
         start_date,
         end_date,
         initial_capital: Decimal::from(10000),
-        timeframe: TimeFrame::H1,
+        timeframe,
         pairs: vec![
             TradingPair::BTCUSDT,
             TradingPair::ETHUSDT,
@@ -989,6 +1038,84 @@ async fn export_training_data(start: &str, end: &str, output: &str) -> Result<()
     info!("Exported {} trades to {}", training_data.len(), output);
     info!("  Wins: {}", training_data.iter().filter(|(_, w, _)| *w).count());
     info!("  Losses: {}", training_data.iter().filter(|(_, w, _)| !*w).count());
+
+    Ok(())
+}
+
+async fn export_signals(
+    start: &str,
+    end: &str,
+    output: &str,
+    lookahead: usize,
+    win_threshold: f64,
+    pairs_str: Option<&str>,
+) -> Result<()> {
+    let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
+    let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .map_err(|_| anyhow!("Invalid end date format. Use YYYY-MM-DD"))?;
+
+    info!("=== Exporting Per-Signal Training Data (M1) ===");
+    info!("Period: {} to {}", start_date, end_date);
+    info!("Lookahead: {} candles ({} minutes)", lookahead, lookahead);
+    info!("Win threshold: {:.2}%", win_threshold);
+    info!("Output: {}", output);
+
+    // Parse trading pairs
+    let pairs = if let Some(p) = pairs_str {
+        p.split(',')
+            .map(|s| match s.trim() {
+                "BTCUSDT" => Ok(TradingPair::BTCUSDT),
+                "ETHUSDT" => Ok(TradingPair::ETHUSDT),
+                "SOLUSDT" => Ok(TradingPair::SOLUSDT),
+                "BNBUSDT" => Ok(TradingPair::BNBUSDT),
+                "ADAUSDT" => Ok(TradingPair::ADAUSDT),
+                "XRPUSDT" => Ok(TradingPair::XRPUSDT),
+                _ => Err(anyhow!("Unknown trading pair: {}", s)),
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        // Default: BTC, ETH, SOL (core pairs only)
+        vec![
+            TradingPair::BTCUSDT,
+            TradingPair::ETHUSDT,
+            TradingPair::SOLUSDT,
+        ]
+    };
+
+    // Create signal collection config
+    let config = engine::SignalCollectionConfig {
+        start_date,
+        end_date,
+        timeframe: TimeFrame::M1,
+        pairs,
+        lookahead_candles: lookahead,
+        win_threshold_pct: win_threshold,
+    };
+
+    // Run signal collector
+    let mut collector = engine::SignalCollector::new(config);
+    let signals = collector.run().await?;
+
+    if signals.is_empty() {
+        return Err(anyhow!("No signals collected. Check date range and pairs."));
+    }
+
+    // Export to CSV
+    collector.export_to_csv(output)?;
+
+    // Print per-pair breakdown
+    info!("=== Per-Pair Breakdown ===");
+    for pair in &collector.config.pairs {
+        let pair_signals: Vec<_> = signals.iter().filter(|s| s.pair == *pair).collect();
+        let pair_total = pair_signals.len();
+        if pair_total > 0 {
+            let pair_wins = pair_signals.iter().filter(|s| s.is_win).count();
+            let pair_win_rate = pair_wins as f64 / pair_total as f64 * 100.0;
+            info!("  {}: {} signals, {} wins ({:.1}%)",
+                pair.as_str(), pair_total, pair_wins, pair_win_rate);
+        }
+    }
 
     Ok(())
 }

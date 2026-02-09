@@ -24,3 +24,14 @@ Thumbs.db
 # Database
 *.db
 *.db-journal
+
+# ML training data (large files)
+signals_m1*.csv
+training_data.csv
+test_signals.csv
+
+# Python virtual environment
+scripts/.venv/
+
+# Temporary files
+fix_header.py
