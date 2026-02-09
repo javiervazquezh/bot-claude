@@ -35,6 +35,7 @@ pub struct BacktestConfig {
     pub walk_forward_windows: Option<usize>, // None = standard backtest, Some(n) = n windows
     pub walk_forward_oos_pct: Decimal,       // Out-of-sample percentage (default 0.25)
     pub hmm_model_path: Option<String>,      // Optional path to trained HMM model JSON
+    pub ensemble_model_dir: Option<String>,   // Optional path to ONNX ensemble model directory
 }
 
 impl Default for BacktestConfig {
@@ -56,6 +57,7 @@ impl Default for BacktestConfig {
             walk_forward_windows: None,  // Standard backtest by default
             walk_forward_oos_pct: dec!(0.25), // 25% out-of-sample
             hmm_model_path: None,        // No HMM by default
+            ensemble_model_dir: None,    // No ONNX ensemble by default
         }
     }
 }
@@ -90,6 +92,8 @@ pub struct BacktestEngine {
     retrain_interval: usize,
     /// Maps pair → ML trade_id for matching entry features to exit outcomes
     ml_trade_ids: HashMap<TradingPair, String>,
+    /// ONNX ensemble predictor (XGBoost + Random Forest)
+    ensemble_predictor: Option<crate::ml::EnsemblePredictor>,
     /// Volatility targeting: rolling daily returns for realized vol calculation
     daily_returns_window: Vec<f64>,
     /// Previous day's ending equity (for computing daily returns)
@@ -159,6 +163,26 @@ impl BacktestEngine {
             atr_indicators.insert(*pair, crate::indicators::atr::ATR::new(28));
         }
 
+        // Load ONNX ensemble if directory provided
+        let ensemble_predictor = if let Some(ref ensemble_dir) = config.ensemble_model_dir {
+            match crate::ml::EnsemblePredictor::load_from_dir(ensemble_dir, 0.55) {
+                Ok(ensemble) if ensemble.is_loaded() => {
+                    info!("ONNX ensemble loaded: {} models from {}", ensemble.model_count(), ensemble_dir);
+                    Some(ensemble)
+                }
+                Ok(_) => {
+                    warn!("No ONNX models found in {}", ensemble_dir);
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to load ONNX ensemble from {}: {}", ensemble_dir, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             exchange: BinanceClient::public_only(),
@@ -181,10 +205,16 @@ impl BacktestEngine {
             trades_since_retrain: 0,
             retrain_interval: 20,
             ml_trade_ids: HashMap::new(),
+            ensemble_predictor,
             daily_returns_window: Vec::new(),
             prev_day_equity: None,
             vol_scale: Decimal::ONE,
         }
+    }
+
+    /// Get training data collected during backtest (features + outcome + pnl)
+    pub fn get_training_data(&self) -> Vec<(TradeFeatures, bool, f64)> {
+        self.outcome_tracker.get_training_data_with_pnl()
     }
 
     /// Main entry point for running backtest
@@ -543,13 +573,18 @@ impl BacktestEngine {
             }
         }
 
-        // ML signal gating: extract features and check predictor
+        // ML signal gating: prefer ensemble if loaded, fall back to logistic regression
         if side == Some(Side::Buy) && !has_position {
             if let Some(buffer) = self.candle_buffers.get(&signal.pair) {
                 let recent = self.outcome_tracker.recent_trades(10);
                 let feats = features::extract_features(&signal, buffer, &recent, None, None);
                 if let Some(ref f) = feats {
-                    if !self.trade_predictor.should_trade(f) {
+                    let should_trade = if let Some(ref mut ensemble) = self.ensemble_predictor {
+                        ensemble.should_trade(f)
+                    } else {
+                        self.trade_predictor.should_trade(f)
+                    };
+                    if !should_trade {
                         debug!("ML model rejected signal for {}", signal.pair);
                         return Ok(());
                     }

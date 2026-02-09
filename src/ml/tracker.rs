@@ -44,6 +44,11 @@ impl OutcomeTracker {
             .collect()
     }
 
+    /// Get training data with pnl (features + win/loss + pnl_pct)
+    pub fn get_training_data_with_pnl(&self) -> Vec<(TradeFeatures, bool, f64)> {
+        self.completed.clone()
+    }
+
     /// Get recent trades for performance feature computation
     pub fn recent_trades(&self, n: usize) -> Vec<RecentTrade> {
         self.completed.iter()

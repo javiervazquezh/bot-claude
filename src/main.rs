@@ -78,6 +78,21 @@ enum Commands {
         /// Path to trained HMM model JSON file
         #[arg(long)]
         hmm: Option<String>,
+        /// Path to ONNX ensemble model directory
+        #[arg(long)]
+        ensemble: Option<String>,
+    },
+    /// Export training data from backtest for Python ML training
+    ExportTrainingData {
+        /// Start date (YYYY-MM-DD)
+        #[arg(short, long)]
+        start: String,
+        /// End date (YYYY-MM-DD)
+        #[arg(short, long)]
+        end: String,
+        /// Output CSV file path
+        #[arg(short, long, default_value = "training_data.csv")]
+        output: String,
     },
     /// Show current market prices
     Prices,
@@ -139,12 +154,15 @@ async fn main() -> Result<()> {
         Commands::Live => {
             error!("Live trading not yet implemented. Use paper trading mode first.");
         }
-        Commands::Backtest { start, end, save_to_db, walk_forward, hmm } => {
+        Commands::Backtest { start, end, save_to_db, walk_forward, hmm, ensemble } => {
             if let Some(n_windows) = walk_forward {
                 run_walk_forward_backtest(&start, &end, n_windows, hmm.as_deref()).await?;
             } else {
-                run_backtest(&start, &end, save_to_db, hmm.as_deref()).await?;
+                run_backtest(&start, &end, save_to_db, hmm.as_deref(), ensemble.as_deref()).await?;
             }
+        }
+        Commands::ExportTrainingData { start, end, output } => {
+            export_training_data(&start, &end, &output).await?;
         }
         Commands::Prices => {
             show_prices().await?;
@@ -637,7 +655,7 @@ async fn analyze_market(pair_str: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option<&str>) -> Result<()> {
+async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option<&str>, ensemble_dir: Option<&str>) -> Result<()> {
     // Parse dates
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
@@ -686,6 +704,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
             walk_forward_windows: None,
             walk_forward_oos_pct: dec!(0.25),
             hmm_model_path: hmm_path.map(|s| s.to_string()),
+            ensemble_model_dir: ensemble_dir.map(|s| s.to_string()),
         };
 
         let mut engine = BacktestEngine::new(config);
@@ -767,6 +786,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: hmm_path.map(|s| s.to_string()),
+            ensemble_model_dir: ensemble_dir.map(|s| s.to_string()),
     };
     let mut engine1 = BacktestEngine::new(conservative);
     let results1 = engine1.run().await?;
@@ -800,6 +820,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: hmm_path.map(|s| s.to_string()),
+            ensemble_model_dir: ensemble_dir.map(|s| s.to_string()),
     };
     let mut engine2 = BacktestEngine::new(moderate);
     let results2 = engine2.run().await?;
@@ -833,6 +854,7 @@ async fn run_backtest(start: &str, end: &str, save_to_db: bool, hmm_path: Option
         walk_forward_windows: None,
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: hmm_path.map(|s| s.to_string()),
+            ensemble_model_dir: ensemble_dir.map(|s| s.to_string()),
     };
     let mut engine3 = BacktestEngine::new(aggressive);
     let results3 = engine3.run().await?;
@@ -900,10 +922,77 @@ async fn run_walk_forward_backtest(start: &str, end: &str, n_windows: usize, hmm
         walk_forward_windows: Some(n_windows),
         walk_forward_oos_pct: dec!(0.25),
         hmm_model_path: hmm_path.map(|s| s.to_string()),
+        ensemble_model_dir: None,
     };
 
     let result = BacktestEngine::run_walk_forward(config, n_windows).await?;
     result.print_summary();
+
+    Ok(())
+}
+
+async fn export_training_data(start: &str, end: &str, output: &str) -> Result<()> {
+    let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .map_err(|_| anyhow!("Invalid start date format. Use YYYY-MM-DD"))?;
+    let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .map_err(|_| anyhow!("Invalid end date format. Use YYYY-MM-DD"))?;
+
+    info!("=== Exporting Training Data ===");
+    info!("Period: {} to {}", start_date, end_date);
+    info!("Output: {}", output);
+
+    // Run backtest to collect trade data
+    let config = BacktestConfig {
+        start_date,
+        end_date,
+        initial_capital: Decimal::from(10000),
+        timeframe: TimeFrame::H1,
+        pairs: vec![
+            TradingPair::BTCUSDT,
+            TradingPair::ETHUSDT,
+            TradingPair::SOLUSDT,
+        ],
+        fee_rate: dec!(0.001),
+        slippage_rate: dec!(0.0005),
+        min_confidence: dec!(0.55),
+        min_risk_reward: dec!(1.5),
+        risk_per_trade: dec!(0.12),
+        max_allocation: dec!(0.90),
+        max_correlated_positions: 3,
+        max_drawdown_pct: dec!(25),
+        walk_forward_windows: None,
+        walk_forward_oos_pct: dec!(0.25),
+        hmm_model_path: None,
+        ensemble_model_dir: None,
+    };
+
+    let mut engine = BacktestEngine::new(config);
+    let _results = engine.run().await?;
+
+    // Get training data from outcome tracker
+    let training_data = engine.get_training_data();
+
+    if training_data.is_empty() {
+        return Err(anyhow!("No training data collected. Run a longer backtest period."));
+    }
+
+    // Write CSV
+    let mut file = std::fs::File::create(output)?;
+    use std::io::Write;
+
+    // Header
+    writeln!(file, "signal_strength,confidence,risk_reward_ratio,rsi_14,atr_pct,ema_spread_pct,bb_position,price_vs_200ema,volume_ratio,volatility_regime,recent_win_rate,recent_avg_pnl_pct,streak,hour_of_day,day_of_week,pair_id,ob_spread_pct,ob_depth_imbalance,ob_mid_price_momentum,ob_spread_volatility,ob_book_pressure,ob_weighted_spread,ob_best_volume_ratio,ob_depth_ratio,win,pnl_pct")?;
+
+    // Data rows
+    for (features, is_win, pnl_pct) in &training_data {
+        let arr = features.to_array();
+        let row: Vec<String> = arr.iter().map(|v| format!("{:.6}", v)).collect();
+        writeln!(file, "{},{},{:.6}", row.join(","), if *is_win { 1 } else { 0 }, pnl_pct)?;
+    }
+
+    info!("Exported {} trades to {}", training_data.len(), output);
+    info!("  Wins: {}", training_data.iter().filter(|(_, w, _)| *w).count());
+    info!("  Losses: {}", training_data.iter().filter(|(_, w, _)| !*w).count());
 
     Ok(())
 }
